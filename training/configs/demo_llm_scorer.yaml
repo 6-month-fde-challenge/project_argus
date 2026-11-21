@@ -1,0 +1,9 @@
+# Demo example 2 - LLM scorer (Figure 4, gate "yes" branch), side by side with demo_hybrid.
+# Reuses the demo_hybrid run (data checks, XGBoost, pilot, gate, CPT, explainer, DPO, explainer student) and
+# trains only the LLM-scorer branch with the pilot winner as teacher: 4a SFT scorer -> 6a distilled student ->
+# 7 FP8 (+ AWQ explainer again) -> 8 calibrate -> registry.
+extends: local_demo.yaml
+run_name: argus_demo_llm_scorer
+reuse_from: argus_demo_hybrid
+gate: {mode: llm}
+stages: [sft_scorer, distill_scorer, quantize, calibrate, registry]

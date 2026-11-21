@@ -1,0 +1,19 @@
+# torch 2.14.0 comes from the base image (pytorch/pytorch:2.14.0-cuda12.6-cudnn9-runtime), the version vLLM 0.33
+# pins and llm-compressor 0.15 supports. transformers 5.17 sits inside llm-compressor's (5.15-5.21) and Liger's
+# (>=5.0) ranges. Versions checked on PyPI, 2026-11-07.
+torch==2.14.0               # already in the base image; pinned so no dependency can replace it
+transformers==5.17.0
+peft==0.21.2
+accelerate==1.15.0
+bitsandbytes==0.50.2        # QLoRA (4-bit NF4) + paged 8-bit optimizer
+liger-kernel==0.8.5         # fused training kernels (efficiency.liger)
+llmcompressor==0.15.0       # stage 7: FP8 + AWQ 4-bit (pulls compressed-tensors 0.20.1)
+datasets==5.1.0
+scikit-learn==1.9.1
+xgboost==3.2.0
+mlflow==3.18.0
+pandas==3.1.1
+pyarrow==26.0.1
+pyyaml==6.0.3
+requests==2.34.2
+python-dotenv==1.2.4

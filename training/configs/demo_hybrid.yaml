@@ -1,0 +1,5 @@
+# Demo example 1 - HYBRID: XGBoost scores, the LLM explains (Figure 4, gate "no" branch).
+# Full ladder; the gate still measures the LLM-vs-XGBoost uplift, but the HYBRID branch is always taken.
+extends: local_demo.yaml
+run_name: argus_demo_hybrid
+gate: {mode: hybrid}

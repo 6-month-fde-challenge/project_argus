@@ -1,0 +1,119 @@
+# Project ARGUS - every service of the solution in one file.
+#
+#   docker compose build trainer && docker compose build        # images (training first: scoring builds on it)
+#   docker compose up -d                                         # UI :3000, platform API :8090, MLflow :5000
+#   docker compose --profile serve up -d                         # + Fraud Model API :8080 and vLLM explainer :8000
+#   docker compose run --rm trainer python -m argus_ft.pipeline --config configs/smoke.yaml   # a run from the CLI
+#
+# Secrets (SUPABASE_URL / SUPABASE_KEY, optional HF_TOKEN) come from ../.env (01_argus/.env).
+# The GPU is shared on a 4 GB card: the platform queues training while scoring / explainer hold it.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+x-training-volumes: &training-volumes
+  - ./training/outputs:/workspace/outputs
+  - ./training/data:/workspace/data
+  - ./training/.hf_cache:/workspace/.hf_cache
+  - ./training/configs:/workspace/configs
+  - ./training/argus_ft:/workspace/argus_ft
+
+services:
+  # ------------------------------------------------------------------ UI (React SPA + nginx, /api -> platform)
+  frontend:
+    build: ./frontend
+    image: argus-frontend:latest
+    ports: ["3000:80"]
+    depends_on:
+      platform:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ control plane / backend-for-frontend
+  platform:
+    <<: *gpu                      # NVML telemetry only (read-only, no CUDA context)
+    build:
+      context: ./platform
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}   # set a PyPI mirror on slow networks
+    image: argus-platform:latest
+    env_file: ../.env
+    environment:
+      ARGUS_MLFLOW_PUBLIC_URL: http://localhost:5000
+      ARGUS_TRAINING_IMAGE: argus-training:latest
+    ports: ["8090:8090"]
+    volumes:
+      - ./training/outputs:/workspace/outputs
+      - ./training/data:/workspace/data
+      - ./training/.hf_cache:/workspace/.hf_cache
+      - ./training/configs:/workspace/configs
+      - ./training/argus_ft:/workspace/argus_ft      # host path handed to launched job containers
+      - ../client_docs:/workspace/client_docs:ro
+      - ../day_wise/part_03/diagrams:/workspace/diagrams:ro
+      - /var/run/docker.sock:/var/run/docker.sock    # launches / stops training jobs and serving containers
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ MLflow tracking + model registry
+  mlflow:
+    image: argus-training:latest
+    pull_policy: never            # built locally (docker compose build trainer)
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////workspace/outputs/mlruns/mlflow.db
+      --default-artifact-root file:///workspace/outputs/mlruns/artifacts
+      --allowed-hosts localhost,localhost:*,127.0.0.1,127.0.0.1:*,mlflow,mlflow:*
+      --cors-allowed-origins http://localhost:3000,http://127.0.0.1:3000
+      --x-frame-options NONE
+    ports: ["5000:5000"]
+    volumes:
+      - ./training/outputs:/workspace/outputs
+    entrypoint: ["sh", "-c", "mkdir -p /workspace/outputs/mlruns/artifacts && exec \"$$@\"", "--"]
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ online scoring (CRD 10 / LLD 4-6)
+  scoring:
+    <<: *gpu
+    build: ./scoring_api
+    image: argus-scoring:latest
+    pull_policy: never
+    profiles: ["serve"]
+    env_file: ../.env
+    environment:
+      ARGUS_CONFIG: configs/local_demo.yaml
+      ARGUS_RUN: ${RUN_NAME:-argus_demo_llm_scorer}   # deployed at start-up; switch at runtime from the UI
+      VLLM_URL: http://explainer:8000
+    ports: ["8080:8080"]
+    volumes: *training-volumes
+    restart: unless-stopped
+
+  explainer:
+    <<: *gpu
+    image: vllm/vllm-openai:v0.33.0
+    profiles: ["serve"]
+    volumes:
+      - ./training/outputs/${EXPLAINER_RUN:-argus_demo_llm_scorer}/explainer_student/awq:/models/explainer:ro
+    ports: ["8000:8000"]
+    ipc: host
+    command: >
+      --model /models/explainer
+      --served-model-name argus-explainer
+      --max-model-len 2048
+      --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.5}
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ training (CLI runs; the UI launches its own)
+  trainer:
+    <<: *gpu
+    build: ./training
+    image: argus-training:latest
+    pull_policy: never
+    profiles: ["job"]
+    env_file: ../.env
+    volumes: *training-volumes
+    shm_size: "8gb"

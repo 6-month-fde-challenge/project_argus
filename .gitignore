@@ -1,0 +1,64 @@
+# ---------- Secrets / env ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ---------- Demo & recording artifacts (large, local only) ----------
+demo/
+demo_walkthrough/
+demo_edit_jobs.json
+_net.py
+*.mp4
+*.webm
+*.mov
+*.wav
+*.mp3
+
+# ---------- Training: data, checkpoints, model cache ----------
+training/data/
+training/outputs/
+training/.hf_cache/
+.hf_cache/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.gguf
+*.parquet
+wandb/
+mlruns/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build.log
+
+# ---------- Node / frontend ----------
+node_modules/
+dist/
+coverage/
+.vite/
+npm-debug.log*
+
+# ---------- Editor / OS ----------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log

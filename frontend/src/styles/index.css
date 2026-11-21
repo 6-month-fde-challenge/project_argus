@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+/* Design tokens: one palette for the whole app (dark ops-console look, cyan -> violet brand). */
+@theme {
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Consolas", ui-monospace, monospace;
+
+  --color-bg: #060a14;
+  --color-surface: #0c1222;
+  --color-surface-2: #111a2e;
+  --color-line: rgb(148 163 184 / 0.12);
+  --color-muted: #8a96ad;
+  --color-ink: #e6ebf5;
+
+  --color-brand: #22d3ee;
+  --color-brand-2: #8b5cf6;
+  --color-ok: #34d399;
+  --color-warn: #fbbf24;
+  --color-bad: #fb7185;
+  --color-info: #60a5fa;
+
+  --animate-pulse-soft: pulse-soft 2s ease-in-out infinite;
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-flow: flow 1.2s linear infinite;
+}
+
+@keyframes pulse-soft { 0%, 100% { opacity: 1 } 50% { opacity: 0.45 } }
+@keyframes shimmer { 0% { background-position: -400px 0 } 100% { background-position: 400px 0 } }
+@keyframes flow { to { stroke-dashoffset: -20 } }
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    @apply bg-bg text-ink font-sans antialiased;
+    background-image:
+      radial-gradient(1200px 600px at 85% -10%, rgb(139 92 246 / 0.10), transparent 60%),
+      radial-gradient(900px 500px at -10% 10%, rgb(34 211 238 / 0.08), transparent 60%);
+    background-attachment: fixed;
+  }
+  ::selection { background: rgb(34 211 238 / 0.3); }
+  * { scrollbar-width: thin; scrollbar-color: rgb(148 163 184 / 0.25) transparent; }
+}
+
+@layer components {
+  .glass { @apply bg-surface/70 border border-line backdrop-blur-xl; }
+  .text-gradient { @apply bg-gradient-to-r from-brand to-brand-2 bg-clip-text text-transparent; }
+  .grid-bg {
+    background-image: linear-gradient(rgb(148 163 184 / 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(148 163 184 / 0.05) 1px, transparent 1px);
+    background-size: 28px 28px;
+  }
+  .skeleton {
+    @apply rounded-md;
+    background: linear-gradient(90deg, rgb(148 163 184 / 0.06), rgb(148 163 184 / 0.14), rgb(148 163 184 / 0.06));
+    background-size: 800px 100%;
+    animation: var(--animate-shimmer);
+  }
+  .prose-argus { @apply text-sm leading-relaxed text-ink/90; }
+  .prose-argus h1 { @apply text-2xl font-semibold mt-6 mb-3 text-ink; }
+  .prose-argus h2 { @apply text-xl font-semibold mt-6 mb-2 text-ink; }
+  .prose-argus h3 { @apply text-base font-semibold mt-4 mb-2 text-ink; }
+  .prose-argus p { @apply my-2; }
+  .prose-argus ul { @apply list-disc pl-5 my-2; }
+  .prose-argus ol { @apply list-decimal pl-5 my-2; }
+  .prose-argus table { @apply w-full text-xs my-3 border-collapse; }
+  .prose-argus th { @apply text-left font-medium text-muted border-b border-line px-2 py-1.5; }
+  .prose-argus td { @apply border-b border-line/60 px-2 py-1.5 align-top; }
+  .prose-argus code { @apply font-mono text-[0.8em] bg-white/5 rounded px-1 py-0.5; }
+  .prose-argus pre { @apply bg-black/40 rounded-lg p-3 overflow-auto text-xs; }
+  .prose-argus a { @apply text-brand underline-offset-2 hover:underline; }
+  .prose-argus img { @apply rounded-lg my-3 max-w-full; }
+}

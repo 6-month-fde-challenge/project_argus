@@ -1,0 +1,34 @@
+# Production profile: one A100 80GB, the models named in Part 3 / TR-LLM-01, still a short demo run
+# (1 epoch per stage, capped pilot steps). Llama 3.2 and Gemma 2 are gated on Hugging Face: set HF_TOKEN
+# (in ../.env) for an account that has accepted both licences.
+extends: base.yaml
+run_name: argus_prod_a100
+max_length: 1024                       # CRD FR-FE-05 cap
+
+efficiency: {dataloader_workers: 8}
+
+models:
+  teacher: Qwen/Qwen2.5-7B-Instruct
+  student_scorer: Qwen/Qwen2.5-0.5B           # "~0.5B scorer"  -> FP8 on the L4 serving fleet
+  student_explainer: Qwen/Qwen2.5-1.5B-Instruct  # "~1.5B explainer" -> AWQ 4-bit
+
+lora: {r: 64, alpha: 128}
+eval: {batch_size: 128, max_rows: null}   # all 14,061 validation rows
+
+pilot:
+  candidates:                          # Part 3 Section 5: "Qwen 2.5, Llama 3.2, Gemma 2" (1B-8B, commercial)
+    - Qwen/Qwen2.5-7B-Instruct
+    - meta-llama/Llama-3.2-3B-Instruct
+    - google/gemma-2-2b-it
+  neg_per_pos: 20                      # TR-DATA-09: genuine down-sampled 1:20
+  max_steps: 300
+  val_rows: null
+  batch_size: 16
+
+cpt: {max_docs: 4069, block_size: 1024, batch_size: 8, grad_accum: 4}
+sft_scorer: {method: lora, neg_per_pos: 20, batch_size: 16, grad_accum: 2}
+sft_explainer: {max_rows: 7600, eval_rows: 200, batch_size: 8, grad_accum: 4}
+dpo: {max_pairs: 4900, batch_size: 4, grad_accum: 4}
+distill_scorer: {neg_per_pos: 20, batch_size: 32, lora: {r: 128, alpha: 256}}
+distill_explainer: {max_rows: 4000, batch_size: 8, grad_accum: 4, lora: {r: 64, alpha: 128}}
+quantize: {calibration_samples: 256, awq_group_size: 128}   # Qwen2.5-1.5B hidden 1536 = 12 x 128

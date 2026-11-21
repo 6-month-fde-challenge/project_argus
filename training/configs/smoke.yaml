@@ -1,0 +1,14 @@
+# Smoke profile: every stage with tiny sizes, to catch crashes / OOM / shape bugs in a few minutes.
+extends: base.yaml
+run_name: smoke
+
+eval: {max_rows: 1000}                     # random 1,000 validation rows (~6 fraud)
+pilot: {max_steps: 3, val_rows: 500}
+gate: {mode: llm}                          # exercise every stage whatever the gate measures
+cpt: {max_docs: 30, max_steps: 5}
+sft_scorer: {neg_per_pos: 1, max_steps: 5}
+sft_explainer: {max_rows: 40, eval_rows: 8, max_steps: 5}
+dpo: {max_pairs: 16, eval_pairs: 8}
+distill_scorer: {neg_per_pos: 1, max_steps: 5}
+distill_explainer: {max_rows: 16, max_steps: 5}
+quantize: {calibration_samples: 8}

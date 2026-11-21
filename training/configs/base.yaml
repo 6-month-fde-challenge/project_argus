@@ -1,0 +1,157 @@
+# ARGUS-LM model ladder - full pipeline definition (Part 3, Section 5 / Figure 4).
+# Defaults are the LOCAL DEMO on a 4 GB RTX 3050: small models, 1 epoch / few steps per stage.
+# Profiles (smoke / local_demo / prod_a100) `extends:` this file and override only what differs.
+
+run_name: argus
+data_dir: data/raw          # Supabase bucket cache
+db_dir: data/db             # Supabase table snapshots (parquet)
+output_dir: outputs
+seed: 42
+max_length: 384             # transaction prompt token cap; oldest [HIST] entries trimmed first (FR-FE-05)
+gpu_memory_fraction: 0.95   # hard VRAM cap: fail with OOM instead of spilling into shared system RAM
+
+stages: [data_checks, xgboost, pilot, gate, cpt, sft_scorer, sft_explainer, dpo,
+         distill_scorer, distill_explainer, quantize, calibrate, registry]
+
+efficiency:                 # applied to every Trainer run (stages/common.py)
+  liger: true               # Liger kernels: fused RMSNorm/SwiGLU/RoPE + linear-cross-entropy (big-vocab memory)
+  tf32: true                # TF32 matmuls for fp32 maths (Ampere+)
+  group_by_length: true     # similar-length batches -> less padding
+  dataloader_workers: 2
+
+models:                     # all Apache-2.0, ungated
+  teacher: Qwen/Qwen2.5-0.5B-Instruct            # fallback teacher if the pilot is skipped
+  student_scorer: HuggingFaceTB/SmolLM2-135M     # 6a -> FP8   ("0.5B scorer" in prod)
+  student_explainer: HuggingFaceTB/SmolLM2-135M-Instruct  # 6b -> AWQ ("1.5B explainer" in prod)
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]  # Qwen, Llama, Gemma, Danube
+
+eval:
+  batch_size: 32
+  max_rows: 5000            # random validation sample, ~32 fraud (inference is ~25 rows/s on a 3050); prod: all
+
+# 0 ------------------------------------------------------------- data checks (no settings)
+data_checks: {}
+
+# 1 ------------------------------------------------------------- XGBoost baseline (DB features)
+xgboost:
+  n_estimators: 400
+  max_depth: 6
+  learning_rate: 0.05
+
+# 2 ------------------------------------------------------------- pilot: 3 models x 2 formats, LoRA
+pilot:
+  candidates:               # three model families, ~0.4-0.5B, chat-capable (winner is also the explainer)
+    - Qwen/Qwen2.5-0.5B-Instruct
+    - HuggingFaceTB/SmolLM2-360M-Instruct
+    - h2oai/h2o-danube3-500m-chat
+  formats: [fmt-v1, fmt-v2]
+  neg_per_pos: 4            # 438 fraud + 1,752 genuine rows
+  max_steps: 60             # same short budget for every pair
+  val_rows: 2000            # validation rows (from the eval sample) used to rank the 6 pairs
+  batch_size: 8
+  grad_accum: 1
+  lr: 3.0e-4
+  gradient_checkpointing: true
+
+#   ------------------------------------------------------------- week-8 gate
+gate:
+  min_uplift: 0.03          # PR-AUC uplift over XGBoost required (OBJ-04)
+  mode: auto                # auto: follow the measured decision (Figure 4) | hybrid / llm: force a branch (demos)
+
+# 3 ------------------------------------------------------------- continued pre-training
+cpt:
+  method: lora
+  max_docs: 300             # of 4,069 corpus documents
+  block_size: 384
+  epochs: 1
+  batch_size: 4
+  grad_accum: 2
+  lr: 2.0e-4
+  gradient_checkpointing: true
+
+# 4a ------------------------------------------------------------ SFT teacher scorer: fraud + 8 reason heads
+sft_scorer:
+  method: qlora             # 4-bit base + LoRA
+  neg_per_pos: 6            # 438 fraud + 2,628 genuine rows
+  epochs: 1
+  batch_size: 8
+  grad_accum: 2
+  lr: 3.0e-4
+  reason_weight: 0.5        # loss weight of the reason-code heads relative to the fraud head
+  gradient_checkpointing: true
+
+# 4b ------------------------------------------------------------ SFT teacher explainer: JSON output
+sft_explainer:
+  method: lora
+  max_rows: 4000            # of 7,600 gold cases: 250 steps (1,000 = 63 steps only learned the majority answer)
+  val_rows: 400             # latest gold cases held out
+  eval_rows: 64             # generations scored for JSON validity / reason F1 / guard
+  answer_budget: 128        # max answer tokens (train and generate)
+  epochs: 1
+  batch_size: 4
+  grad_accum: 4
+  lr: 2.0e-4
+  gradient_checkpointing: true
+
+# 5 ------------------------------------------------------------- DPO on the explainer
+dpo:
+  method: lora
+  max_pairs: 300            # of 5,000 preference pairs
+  eval_pairs: 100           # latest pairs held out
+  epochs: 1
+  batch_size: 2
+  grad_accum: 4
+  beta: 0.1
+  rpo_alpha: 1.0            # + NLL on the chosen answer: stops easy pairs collapsing the policy (TRL rpo_alpha)
+  lr: 1.0e-5
+
+# 6a ------------------------------------------------------------ distil scorer: teacher -> student
+distill_scorer:
+  neg_per_pos: 8
+  seed_offset: 1            # different genuine rows than the teacher saw
+  epochs: 1
+  batch_size: 16
+  grad_accum: 1
+  lr: 5.0e-4
+  alpha: 0.5                # weight on hard labels; (1 - alpha) on teacher soft targets
+  temperature: 2.0
+  gradient_checkpointing: true
+  lora: {r: 32, alpha: 64}
+
+# 6b ------------------------------------------------------------ distil explainer: DPO teacher -> student
+distill_explainer:
+  method: lora
+  max_rows: 1000            # gold-training prompts the teacher answers
+  epochs: 1
+  batch_size: 8
+  grad_accum: 2
+  lr: 3.0e-4
+  gradient_checkpointing: true
+  lora: {r: 32, alpha: 64}
+
+# 7 ------------------------------------------------------------- quantise (llm-compressor)
+quantize:
+  calibration_samples: 64   # AWQ calibration conversations
+  awq_group_size: 64        # must divide the student's hidden size (SmolLM2-135M: 576)
+
+# 8 ------------------------------------------------------------- calibration + evaluation
+calibrate: {}
+
+#   ------------------------------------------------------------- registry (MLflow, outputs/mlruns)
+registry: {}
+
+# ---------------------------------------------------------------- online scoring API (argus_api, CRD 10 / LLD 4-6)
+api:
+  token: demo-service-token       # Authorization: Bearer <token> (prod: mTLS + 15-min JWT)
+  admin_token: demo-admin-token   # admin API (prod: SSO + MFA)
+  vllm_url: http://explainer:8000 # explainer service (docker compose --profile serve)
+  deadline_ms: 250                # LLD 6.3 deadline.total_ms; X-Request-Deadline-Ms may lower it
+  max_deadline_ms: 280
+  explain_cutoff_ms: 220          # LLD 6.3: REVIEW/BLOCK wait at most this long for the explainer
+  async_explain_timeout_s: 5      # FR-API-05: async explanations in the audit log within 5 s
+  time_window_minutes: 15         # LLD 4.1: transaction_time within +-15 min of server time

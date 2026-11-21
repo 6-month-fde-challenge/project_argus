@@ -1,0 +1,12 @@
+# ARGUS platform API (control plane). Versions checked on PyPI, 2026-11-08.
+fastapi==0.162.2
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+pydantic-settings==2.16.2
+docker==7.2.0            # launches training jobs through the Docker socket
+httpx==0.28.1            # scoring API, MLflow, vLLM
+pyyaml==6.0.3            # training profiles
+nvidia-ml-py==13.615.71  # GPU telemetry (NVML, read-only)
+mammoth==1.13.0          # client .docx -> HTML
+pandas==3.1.1            # sample scoring requests from the dataset
+pyarrow==26.0.1

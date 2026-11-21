@@ -1,0 +1,9 @@
+# Local demo profile: RTX 3050 Laptop (4 GB). base.yaml defaults are already sized for it.
+extends: base.yaml
+run_name: argus_local_demo
+
+api:                              # a 4 GB laptop GPU scores in ~0.3 s: production's 250 ms / 220 ms budgets are raised
+  deadline_ms: 5000
+  max_deadline_ms: 6000
+  explain_cutoff_ms: 3000
+  time_window_minutes: 0          # 0 = off: the demo replays historical 2025 transactions
