@@ -24,8 +24,9 @@ This folder holds the complete working solution:
 
 The client documents are not in this repo. They live in the separate `argus` repo, which is the parent folder
 `01_argus/` (this repo is cloned inside it as `01_argus/argus_solution/`):
-`01_argus/client_docs/` holds the CRD, Architecture, Capacity Planning, HLD and LLD, and
-`01_argus/day_wise/part_01..05` holds the delivery team's own write-ups: client understanding, technical
+[`client_docs/`](https://github.com/6-month-fde-challenge/argus/tree/main/client_docs) holds the CRD,
+Architecture, Capacity Planning, HLD and LLD, and
+[`day_wise/part_01..05`](https://github.com/6-month-fde-challenge/argus/tree/main/day_wise) holds the delivery team's own write-ups: client understanding, technical
 requirements, proposed solution with diagrams, client questions, mock meeting.
 Section numbers below such as "CRD 10.2" or "LLD 4.1" point into those documents.
 

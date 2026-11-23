@@ -1,15 +1,26 @@
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "motion/react";
-import { FileText, Image, Maximize2 } from "lucide-react";
+import { ExternalLink, FileText, Image, Maximize2 } from "lucide-react";
 import { useState } from "react";
 import { api, API_BASE } from "@/shared/api/client";
 import { keys } from "@/shared/api/queries";
 import { cn } from "@/shared/lib/utils";
-import { Card, CardBody, EmptyState, ErrorState, PageHeader, Skeleton } from "@/shared/ui/core";
+import { Button, Card, CardBody, EmptyState, ErrorState, PageHeader, Skeleton } from "@/shared/ui/core";
 import { Dialog, Tabs } from "@/shared/ui/overlays";
 
 interface Doc { name: string; title: string; size_kb: number }
 interface Diagram { name: string; title: string; media_type: string }
+
+// The documents live in the separate `argus` repo (the parent folder 01_argus/ locally, mounted by docker-compose).
+const DOCS_REPO = "https://github.com/6-month-fde-challenge/argus/tree/main";
+const DOCS_URL = `${DOCS_REPO}/client_docs`;
+const DIAGRAMS_URL = `${DOCS_REPO}/day_wise/part_03/diagrams`;
+
+function GitHubLink({ href, label }: { href: string; label: string }) {
+  return <Button asChild><a href={href} target="_blank" rel="noreferrer"><ExternalLink className="h-4 w-4" /> {label}</a></Button>;
+}
+
+const NOT_MOUNTED_HINT = "They live in the separate argus repo. Clone this repo inside it (01_argus/argus_solution) so docker-compose can mount them, or open them on GitHub.";
 
 function Documents() {
   const list = useQuery({ queryKey: keys.documents, queryFn: () => api.get<Doc[]>("/docs/documents") });
@@ -17,7 +28,7 @@ function Documents() {
   const current = active ?? list.data?.[0]?.name;
   const html = useQuery({ queryKey: keys.document(current ?? ""), queryFn: () => api.text(`/docs/documents/${encodeURIComponent(current!)}`), enabled: !!current });
   if (list.error) return <ErrorState error={list.error} />;
-  if (!list.data?.length) return <EmptyState title="No client documents mounted" />;
+  if (!list.data?.length) return <EmptyState title="No client documents mounted" hint={NOT_MOUNTED_HINT} action={<GitHubLink href={DOCS_URL} label="Open documents on GitHub" />} />;
   return (
     <div className="grid gap-5 xl:grid-cols-[300px_1fr]">
       <Card><CardBody className="space-y-1 pt-4">{list.data.map((d) => (
@@ -35,7 +46,7 @@ function Diagrams() {
   const { data, error } = useQuery({ queryKey: keys.diagrams, queryFn: () => api.get<Diagram[]>("/docs/diagrams") });
   const [open, setOpen] = useState<Diagram | null>(null);
   if (error) return <ErrorState error={error} />;
-  if (!data?.length) return <EmptyState title="No diagrams mounted" />;
+  if (!data?.length) return <EmptyState title="No diagrams mounted" hint={NOT_MOUNTED_HINT} action={<GitHubLink href={DIAGRAMS_URL} label="Open diagrams on GitHub" />} />;
   return (
     <>
       <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">{data.map((d, i) => (
@@ -54,7 +65,8 @@ function Diagrams() {
 export default function DocsPage() {
   return (
     <>
-      <PageHeader eyebrow="Knowledge" title="Client documents & diagrams" subtitle="The CRD, architecture, capacity plan, HLD and LLD, rendered from the client's own .docx files, plus the solution diagrams from Part 3." />
+      <PageHeader eyebrow="Knowledge" title="Client documents & diagrams" subtitle="The CRD, architecture, capacity plan, HLD and LLD, rendered from the client's own .docx files, plus the solution diagrams from Part 3."
+        actions={<GitHubLink href={DOCS_REPO} label="View on GitHub" />} />
       <Tabs tabs={[
         { id: "diagrams", label: <span className="flex items-center gap-1.5"><Image className="h-3.5 w-3.5" /> Diagrams</span>, content: <Diagrams /> },
         { id: "documents", label: <span className="flex items-center gap-1.5"><FileText className="h-3.5 w-3.5" /> Documents</span>, content: <Documents /> },
