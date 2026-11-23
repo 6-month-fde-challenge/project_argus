@@ -1,0 +1,8 @@
+# ARGUS stream service (Kinesis -> Fraud Model API -> decision -> action). Versions checked on PyPI, 2026-11-23.
+boto3==1.44.9            # Kinesis Data Streams, SNS, CloudWatch, S3 (holdout replay on AWS)
+fastapi==0.162.2
+uvicorn[standard]==0.54.0
+pydantic==2.14.3
+httpx==0.28.1            # the Fraud Model API
+pandas==3.1.1            # holdout replay (parquet)
+pyarrow==26.0.1

@@ -6,6 +6,7 @@ from .registry.router import router as registry
 from .runs.router import compare_router as compare
 from .runs.router import router as runs
 from .scoring.router import router as scoring
+from .stream.router import router as stream
 from .system.router import router as system
 
-ROUTERS = [system, profiles, runs, compare, jobs, registry, scoring, knowledge]
+ROUTERS = [system, profiles, runs, compare, jobs, registry, scoring, stream, knowledge]

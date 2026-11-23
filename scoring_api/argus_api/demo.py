@@ -21,6 +21,8 @@ import requests
 
 from argus_ft.config import load_config
 
+from .auth import apply_token_env
+
 CRD_EXAMPLE = {  # CRD 10.2 sample request (transaction not in the dataset -> FEATURES_DEGRADED path)
     "transaction_id": "TX98231", "customer_id": "C_7f31a9", "transaction_amount": 50000.00,
     "merchant_category": "electronics", "transaction_time": "2025-11-14T03:12:44+05:30", "device_id": "D_44be20",
@@ -75,7 +77,9 @@ def main() -> None:
     ap.add_argument("--url", default="http://scoring:8080")
     args = ap.parse_args()
     cfg = load_config(args.config)
-    api = Client(args.url, cfg.api.token, cfg.api.admin_token)
+    tokens = cfg.api
+    apply_token_env(tokens)  # the same tokens the server uses
+    api = Client(args.url, tokens.token, tokens.admin_token)
     wait_until_up(args.url)
 
     val = pd.concat(pd.read_parquet(p) for p in glob.glob(f"{cfg.data_dir}/parquet/transactions/validation/*.parquet"))

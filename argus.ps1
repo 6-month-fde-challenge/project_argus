@@ -9,15 +9,21 @@
     .\argus.ps1 train <profile> [run]  a pipeline run from the CLI (smoke, local_demo, demo_hybrid, ...)
     .\argus.ps1 report                 report.md per demo run + outputs/comparison.md (hybrid vs LLM scorer)
     .\argus.ps1 demo                   CRD / LLD scenarios against the running scoring API -> outputs/<run>/api/
-    .\argus.ps1 logs [service]         follow logs (platform, frontend, mlflow, scoring, explainer, or a job id)
+    .\argus.ps1 loadtest [rps] [sec]   end-to-end API latency at a fixed rate (OBJ-10) -> outputs/<run>/api/
+    .\argus.ps1 stream [stop]          Kinesis emulator + stream scorer :8003 (UI: Live stream); needs serve
+    .\argus.ps1 prefetch <profile>     download every model a profile uses (checks gated access first)
+    .\argus.ps1 aws <command>          AWS deployment: check | up | deploy | status | dataset | down | audit
+    .\argus.ps1 logs [service]         follow logs (platform, frontend, mlflow, scoring, explainer, stream, or a job id)
     .\argus.ps1 status                 containers, images and the latest platform jobs
-    .\argus.ps1 test                   platform pytest + scoring pytest + frontend vitest, all in containers
+    .\argus.ps1 test                   platform, training, scoring, stream pytest + frontend vitest, all in containers
     .\argus.ps1 down                   stop everything (outputs, data and models stay on disk)
+  GPU VM (Hyperstack) and AWS deployment: deploy/README.md.
 #>
 param(
   [Parameter(Position = 0)] [string] $Action = "help",
   [Parameter(Position = 1)] [string] $Arg1,
-  [Parameter(Position = 2)] [string] $Arg2
+  [Parameter(Position = 2)] [string] $Arg2,
+  [Parameter(ValueFromRemainingArguments = $true)] [string[]] $Rest   # e.g. aws down --all -y
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -25,7 +31,34 @@ Set-Location $PSScriptRoot
 function Run([string] $cmd) {
   Write-Host "> $cmd" -ForegroundColor Cyan
   Invoke-Expression $cmd
+  # Docker Desktop on Windows can hold a recreated container's old host port for a few seconds ("ports are not
+  # available"): starting containers again is safe (compose only starts what is not running), so retry that briefly.
+  for ($try = 1; $LASTEXITCODE -ne 0 -and $cmd -match "docker compose .*\bup\b" -and $try -le 3; $try++) {
+    Write-Host "  start failed (often a host port Docker has not released yet): retry $try of 3 in 5 s" -ForegroundColor Yellow
+    Start-Sleep -Seconds 5
+    Invoke-Expression $cmd
+  }
   if ($LASTEXITCODE -ne 0) { throw "failed ($LASTEXITCODE): $cmd" }
+}
+
+# A setting from the environment, else from .env, else the default (the same order docker compose uses).
+function Setting([string] $name, [string] $default) {
+  $value = [Environment]::GetEnvironmentVariable($name)
+  if (-not $value -and (Test-Path .env)) {
+    $line = Get-Content .env | Where-Object { $_ -match "^\s*$name\s*=" } | Select-Object -Last 1
+    if ($line) { $value = ($line -split "=", 2)[1].Trim().Trim('"').Trim("'") }
+  }
+  if ($value) { $value } else { $default }
+}
+$UiPort = Setting "ARGUS_UI_PORT" "3000"; $ApiPort = Setting "ARGUS_API_PORT" "8090"
+$MlflowPort = Setting "ARGUS_MLFLOW_PORT" "5000"; $ScoringPort = Setting "ARGUS_SCORING_PORT" "8080"
+$StreamPort = Setting "ARGUS_STREAM_PORT" "8003"
+
+# No NVIDIA GPU (a Mac, another GPU vendor): the platform would not start with its GPU reservation, so add the overlay
+# that drops it. Training and serving still need an NVIDIA GPU.
+if (-not (Setting "COMPOSE_FILE" "") -and -not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+  $env:COMPOSE_FILE = "docker-compose.yml;docker-compose.nogpu.yml"; $env:COMPOSE_PATH_SEPARATOR = ";"
+  Write-Host "No NVIDIA GPU found: UI, platform and MLflow run without GPU telemetry (docker-compose.nogpu.yml)." -ForegroundColor Yellow
 }
 
 switch ($Action) {
@@ -33,16 +66,17 @@ switch ($Action) {
     Run "docker compose build trainer"
     Run "docker compose --profile serve build scoring"
     Run "docker compose build platform frontend"
+    Run "docker compose --profile stream build stream"
   }
   "up" {
     Run "docker compose up -d"
-    Write-Host "UI http://localhost:3000   API http://localhost:8090/docs   MLflow http://localhost:5000" -ForegroundColor Green
+    Write-Host "UI http://localhost:$UiPort   API http://localhost:$ApiPort/docs   MLflow http://localhost:$MlflowPort" -ForegroundColor Green
   }
   "serve" {
     $run = if ($Arg1) { $Arg1 } else { "argus_demo_llm_scorer" }
     $env:RUN_NAME = $run; $env:EXPLAINER_RUN = $run
     Run "docker compose --profile serve up -d scoring explainer"
-    Write-Host "Fraud Model API http://localhost:8080/docs (serving $run)" -ForegroundColor Green
+    Write-Host "Fraud Model API http://localhost:$ScoringPort/docs (serving $run)" -ForegroundColor Green
   }
   "unserve" { Run "docker compose --profile serve stop scoring explainer" }
   "train" {
@@ -54,26 +88,55 @@ switch ($Action) {
     Run "docker compose run --rm --no-deps trainer python -m argus_ft.compare argus_demo_hybrid argus_demo_llm_scorer"
   }
   "demo" {
-    $run = (Invoke-RestMethod http://localhost:8080/v1/health).active_run
+    # 127.0.0.1, not localhost: Windows tries IPv6 ::1 first and stalls about 2 s on Docker Desktop's forwarding
+    $run = (Invoke-RestMethod "http://127.0.0.1:$ScoringPort/v1/health").active_run
+    # the demo client runs inside the scoring container: it uses the internal port 8080 whatever ARGUS_SCORING_PORT is
     Run "docker compose --profile serve exec scoring python -m argus_api.demo --run $run --url http://localhost:8080"
+  }
+  "loadtest" {
+    $rps = if ($Arg1) { $Arg1 } else { "5" }; $sec = if ($Arg2) { $Arg2 } else { "60" }
+    Run "docker compose --profile serve exec scoring python -m argus_api.loadtest --url http://localhost:8080 --rps $rps --duration $sec"
+  }
+  "stream" {
+    if ($Arg1 -eq "stop") { Run "docker compose --profile stream stop stream kinesis" }
+    else {
+      Run "docker compose --profile stream up -d kinesis stream"
+      Write-Host "Live stream: UI http://localhost:$UiPort/stream   API http://localhost:$StreamPort/live/docs" -ForegroundColor Green
+    }
+  }
+  "prefetch" {
+    if (-not $Arg1) { throw "usage: .\argus.ps1 prefetch <profile>" }
+    Run "docker compose run --rm --no-deps trainer python -m argus_ft.prefetch --config configs/$Arg1.yaml"
+  }
+  "aws" {
+    if (-not $Arg1) { throw "usage: .\argus.ps1 aws check|up|deploy|status|dataset|down|audit" }
+    Run ("python deploy/ops.py " + ((@($Arg1, $Arg2) + $Rest | Where-Object { $_ }) -join " "))
   }
   "logs" {
     if (-not $Arg1) { Run "docker compose logs -f --tail 200" }
     elseif ($Arg1 -match "^[0-9a-f]{10}$") { Run "docker logs -f argus-job-$Arg1" }
-    else { Run "docker compose --profile serve logs -f --tail 200 $Arg1" }
+    else { Run "docker compose --profile serve --profile stream logs -f --tail 200 $Arg1" }
   }
   "status" {
-    Run "docker compose --profile serve ps -a"
-    Run "docker ps -a --filter label=argus.job --format 'table {{.Names}}\t{{.Status}}\t{{.Label `"argus.run`"}}'"
+    Run "docker compose --profile serve --profile stream ps -a"
+    # training jobs: read the labels from JSON (a quoted Go template does not survive Windows argument quoting)
+    Write-Host "> docker ps -a --filter label=argus.job" -ForegroundColor Cyan
+    docker ps -a --filter label=argus.job --format "{{json .}}" | ForEach-Object { $_ | ConvertFrom-Json } |
+      Select-Object Names, Status, @{ n = "Run"; e = { ($_.Labels -split "," | Where-Object { $_ -like "argus.run=*" }) -replace "^argus.run=", "" } } |
+      Format-Table -AutoSize
     Run "docker images --filter reference='argus-*' --format 'table {{.Repository}}\t{{.Size}}'"
   }
   "test" {
     $index = if ($env:PIP_INDEX_URL) { $env:PIP_INDEX_URL } else { "https://pypi.org/simple" }
     Run "docker build -q --build-arg WITH_TESTS=true --build-arg PIP_INDEX_URL=$index -t argus-platform:test ./platform"
     Run "docker run --rm argus-platform:test python -m pytest -q"
-    Run "docker run --rm -v `"${PWD}/scoring_api/tests:/workspace/tests`" -e CUDA_VISIBLE_DEVICES= argus-scoring:latest sh -c `"pip install -q pytest==9.2.0 && python -m pytest -q -p no:cacheprovider tests`""
+    Run "docker compose run --rm --no-deps -T -e CUDA_VISIBLE_DEVICES= -v `"${PWD}/training/tests:/workspace/tests`" -v `"${PWD}/training/pytest.ini:/workspace/pytest.ini`" trainer sh -c `"pip install -q pytest==9.2.0 && python -m pytest -q -p no:cacheprovider tests`""
+    Run "docker run --rm -v `"${PWD}/scoring_api/tests:/workspace/tests`" -v `"${PWD}/training/argus_ft:/workspace/argus_ft`" -e CUDA_VISIBLE_DEVICES= argus-scoring:latest sh -c `"pip install -q pytest==9.2.0 && python -m pytest -q -p no:cacheprovider tests`""
+    Run "docker build -q --build-arg WITH_TESTS=true --build-arg PIP_INDEX_URL=$index -t argus-stream:test ./stream"
+    Run "docker run --rm argus-stream:test python -m pytest -q"
+    Run "docker run --rm -v `"${PWD}/deploy:/deploy`" -w /deploy python:3.12.16-slim-bookworm sh -c `"pip install -q pytest==9.2.0 && python -m pytest -q -p no:cacheprovider tests`""
     Run "docker build --target test ./frontend"
   }
-  "down" { Run "docker compose --profile serve --profile job down" }
-  default { Get-Content $PSCommandPath -TotalCount 15 | Select-Object -Skip 4 }
+  "down" { Run "docker compose --profile serve --profile stream --profile job down" }
+  default { Get-Content $PSCommandPath -TotalCount 20 | Select-Object -Skip 4 }
 }

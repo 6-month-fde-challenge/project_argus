@@ -4,9 +4,8 @@ from __future__ import annotations
 from ...core.container import Container
 
 DEFAULT_LADDER = ["data_checks", "xgboost", "pilot", "gate", "cpt", "sft_scorer", "sft_explainer", "dpo",
-                  "distill_scorer", "distill_explainer", "quantize", "calibrate", "registry"]
-SECTIONS = ("data_checks", "xgboost", "pilot", "gate", "cpt", "sft_scorer", "sft_explainer", "dpo",
-            "distill_scorer", "distill_explainer", "quantize", "calibrate", "registry")
+                  "distill_scorer", "distill_explainer", "quantize", "calibrate", "acceptance", "registry"]
+SECTIONS = tuple(DEFAULT_LADDER)
 
 
 class RunService:
@@ -55,6 +54,33 @@ class RunService:
         return rows
 
     @staticmethod
+    def _gate_mode(report: dict, gate: dict) -> str:
+        """The run's own gate.mode (its config), not the gate entry's, which a reused run copies from its source."""
+        return ((report.get("config") or {}).get("gate") or {}).get("mode") or gate.get("mode") or "auto"
+
+    @staticmethod
+    def _branch(stages: dict, gate: dict) -> str:
+        """The branch the run really took: LLM when its LLM scorer stage trained, whatever the gate measured or forced
+        (a run with reuse_from carries the gate entry of the run it reuses)."""
+        if (stages.get("sft_scorer") or {}).get("status") == "ok" and not (stages.get("sft_scorer") or {}).get("reused_from"):
+            return "LLM"
+        return gate.get("branch") or gate.get("decision") or "HYBRID"
+
+    @classmethod
+    def _forced_reason(cls, report: dict, gate: dict, branch: str) -> str | None:
+        """Why the run is not a measured one - the same rule as argus_ft.branch (acceptance, registry, scoring API)."""
+        mode = cls._gate_mode(report, gate)
+        if mode != "auto":
+            return f"the run forced the branch (gate.mode: {mode})"
+        if not gate.get("decision"):
+            return "no measured gate decision"
+        if (gate.get("mode") or "auto") != "auto":
+            return f"its gate decision was taken with gate.mode: {gate['mode']} (reused)"
+        if branch != gate["decision"]:
+            return f"it took the {branch} branch but the gate measured {gate['decision']}"
+        return None
+
+    @staticmethod
     def _scorer(report: dict) -> str | None:
         q = report.get("stages", {}).get("quantize", {})
         if "scorer_fp8" in q:
@@ -70,6 +96,8 @@ class RunService:
         stages = report.get("stages", {})
         gate, pilot = stages.get("gate", {}), stages.get("pilot", {})
         current = next((r for r in rows if r["status"] == "running"), None)
+        branch = self._branch(stages, gate)
+        why = self._forced_reason(report, gate, branch) if gate else None
         return {
             "name": run, "status": self._status(report, live, job, ladder),
             "profile": report.get("profile") or live.get("profile"), "reused_from": report.get("reused_from"),
@@ -77,7 +105,9 @@ class RunService:
             "stages_done": sum(r["status"] in ("ok", "reused", "skipped") for r in rows), "stages_total": len(rows),
             "current_stage": current["name"] if current else None,
             "progress": current["progress"] if current else None, "last_step": current["last_step"] if current else None,
-            "gate": {k: gate.get(k) for k in ("decision", "mode", "branch", "uplift", "llm_pr_auc", "xgboost_pr_auc")} if gate else None,
+            "gate": {**{k: gate.get(k) for k in ("decision", "uplift", "llm_pr_auc", "xgboost_pr_auc")},
+                     "branch": branch, "mode": self._gate_mode(report, gate),
+                     "forced": why is not None, "forced_reason": why} if gate else None,
             "pilot_winner": pilot.get("selected"), "scorer": self._scorer(report),
             "updated_at": self.c.runs.modified(run), "job": job,
         }
@@ -117,6 +147,7 @@ class RunService:
         for run in runs:
             stages = self.c.runs.report(run).get("stages", {})
             out.append({"summary": self.summary(run), "calibrate": stages.get("calibrate"),
+                        "acceptance": stages.get("acceptance"),
                         "quantize": stages.get("quantize"), "pilot": stages.get("pilot"), "gate": stages.get("gate"),
                         "explainers": {k: (stages.get(k) or {}).get("validation") for k in ("sft_explainer", "dpo", "distill_explainer")}})
         return out

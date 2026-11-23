@@ -28,7 +28,13 @@ export function RunRow({ r, i }: { r: RunSummary; i: number }) {
         </div>
         {r.current_stage && <div className="mt-1 truncate text-[11px] text-warn">{stageLabel(r.current_stage)}{r.progress && ` · ${r.progress.label} ${r.progress.done}/${r.progress.total}`}</div>}
       </td>
-      <td className="px-4 py-3">{r.gate ? <Badge tone={r.gate.decision === "LLM" ? "brand" : "violet"}>{r.gate.decision} {r.gate.uplift >= 0 ? "+" : ""}{fmt.num(r.gate.uplift)}</Badge> : "–"}</td>
+      <td className="px-4 py-3">{r.gate ? (
+        <div className="flex flex-col items-start gap-1">
+          <Badge tone={r.gate.decision === "LLM" ? "brand" : "violet"}>measured {r.gate.decision} {r.gate.uplift >= 0 ? "+" : ""}{fmt.num(r.gate.uplift)}</Badge>
+          {r.gate.forced
+            ? <Badge tone="warn">ran {r.gate.branch ?? r.gate.decision} · demo (forced)</Badge>
+            : <Badge tone="ok">ran {r.gate.branch ?? r.gate.decision} · as measured</Badge>}
+        </div>) : "–"}</td>
       <td className="px-4 py-3">{r.scorer ? <StatusBadge status={r.scorer} /> : "–"}</td>
       <td className="px-4 py-3 text-xs">{r.pilot_winner ? `${fmt.model(r.pilot_winner.teacher)} · ${r.pilot_winner.format}` : "–"}</td>
       <td className="px-4 py-3 text-right text-xs tabular-nums text-muted">{fmt.minutes(r.total_minutes)}</td>

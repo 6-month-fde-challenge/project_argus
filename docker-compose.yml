@@ -3,10 +3,18 @@
 #   docker compose build trainer && docker compose build        # images (training first: scoring builds on it)
 #   docker compose up -d                                         # UI :3000, platform API :8090, MLflow :5000
 #   docker compose --profile serve up -d                         # + Fraud Model API :8080 and vLLM explainer :8000
+#   docker compose --profile stream up -d                        # + Kinesis emulator and the stream scorer :8003
 #   docker compose run --rm trainer python -m argus_ft.pipeline --config configs/smoke.yaml   # a run from the CLI
 #
 # Secrets (SUPABASE_URL / SUPABASE_KEY, optional HF_TOKEN) come from .env in this folder (copy .env.example to .env).
+# Host ports: ARGUS_UI_PORT 3000, ARGUS_API_PORT 8090, ARGUS_MLFLOW_PORT 5000, ARGUS_SCORING_PORT 8080,
+# ARGUS_EXPLAINER_PORT 8000, ARGUS_STREAM_PORT 8003 (set any of them in .env when a port is taken). Containers always
+# talk to each other on the fixed internal ports by service name (platform:8090, scoring:8080, ...).
+# No NVIDIA GPU on this machine: argus.ps1 adds docker-compose.nogpu.yml so the UI, platform and MLflow still start.
 # The GPU is shared on a 4 GB card: the platform queues training while scoring / explainer hold it.
+# Every port binds to 127.0.0.1 unless .env says otherwise: ARGUS_BIND=0.0.0.0 opens the UI, platform, MLflow, vLLM and
+# stream to the network (they have no login), ARGUS_SCORING_BIND=0.0.0.0 opens the token-protected Fraud Model API
+# (setup_vm.sh sets it on the GPU VM, where AWS calls it). Elsewhere, use an SSH tunnel.
 
 x-gpu: &gpu
   deploy:
@@ -29,7 +37,7 @@ services:
   frontend:
     build: ./frontend
     image: argus-frontend:latest
-    ports: ["3000:80"]
+    ports: ["${ARGUS_BIND:-127.0.0.1}:${ARGUS_UI_PORT:-3000}:80"]
     depends_on:
       platform:
         condition: service_healthy
@@ -45,9 +53,10 @@ services:
     image: argus-platform:latest
     env_file: .env
     environment:
-      ARGUS_MLFLOW_PUBLIC_URL: http://localhost:5000
+      ARGUS_MLFLOW_PUBLIC_URL: http://localhost:${ARGUS_MLFLOW_PORT:-5000}   # what the browser opens / embeds
+      ARGUS_CORS_ORIGINS: '["http://localhost:${ARGUS_UI_PORT:-3000}", "http://127.0.0.1:${ARGUS_UI_PORT:-3000}"]'
       ARGUS_TRAINING_IMAGE: argus-training:latest
-    ports: ["8090:8090"]
+    ports: ["${ARGUS_BIND:-127.0.0.1}:${ARGUS_API_PORT:-8090}:8090"]
     volumes:
       - ./training/outputs:/workspace/outputs
       - ./training/data:/workspace/data
@@ -68,9 +77,9 @@ services:
       --backend-store-uri sqlite:////workspace/outputs/mlruns/mlflow.db
       --default-artifact-root file:///workspace/outputs/mlruns/artifacts
       --allowed-hosts localhost,localhost:*,127.0.0.1,127.0.0.1:*,mlflow,mlflow:*
-      --cors-allowed-origins http://localhost:3000,http://127.0.0.1:3000
+      --cors-allowed-origins http://localhost:${ARGUS_UI_PORT:-3000},http://127.0.0.1:${ARGUS_UI_PORT:-3000}
       --x-frame-options NONE
-    ports: ["5000:5000"]
+    ports: ["${ARGUS_BIND:-127.0.0.1}:${ARGUS_MLFLOW_PORT:-5000}:5000"]
     volumes:
       - ./training/outputs:/workspace/outputs
     entrypoint: ["sh", "-c", "mkdir -p /workspace/outputs/mlruns/artifacts && exec \"$$@\"", "--"]
@@ -85,10 +94,10 @@ services:
     profiles: ["serve"]
     env_file: .env
     environment:
-      ARGUS_CONFIG: configs/local_demo.yaml
+      ARGUS_CONFIG: ${SCORING_CONFIG:-configs/local_demo.yaml}   # api: deadlines + time window (prod_a100: 250 ms)
       ARGUS_RUN: ${RUN_NAME:-argus_demo_llm_scorer}   # deployed at start-up; switch at runtime from the UI
       VLLM_URL: http://explainer:8000
-    ports: ["8080:8080"]
+    ports: ["${ARGUS_SCORING_BIND:-127.0.0.1}:${ARGUS_SCORING_PORT:-8080}:8080"]
     volumes: *training-volumes
     restart: unless-stopped
 
@@ -98,13 +107,51 @@ services:
     profiles: ["serve"]
     volumes:
       - ./training/outputs/${EXPLAINER_RUN:-argus_demo_llm_scorer}/explainer_student/awq:/models/explainer:ro
-    ports: ["8000:8000"]
+    ports: ["${ARGUS_BIND:-127.0.0.1}:${ARGUS_EXPLAINER_PORT:-8000}:8000"]
     ipc: host
     command: >
       --model /models/explainer
       --served-model-name argus-explainer
       --max-model-len 2048
       --gpu-memory-utilization ${VLLM_GPU_UTIL:-0.5}
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ real-time stream (Kinesis -> Fraud Model API -> action)
+  kinesis:                        # local Amazon Kinesis emulator, in memory (AWS uses real Kinesis: deploy/terraform)
+    image: motoserver/moto:5.2.4
+    profiles: ["stream"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/moto-api/')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  stream:                         # producer + scorer + analytics API; the UI's Live stream page (via the platform)
+    build: ./stream
+    image: argus-stream:latest
+    profiles: ["stream"]
+    env_file: .env                # ARGUS_SCORING_TOKEN, if set, so it matches the scoring service
+    environment:
+      KINESIS_ENABLED: "1"
+      KINESIS_ENDPOINT: http://kinesis:5000
+      KINESIS_CREATE: "1"         # creates argus-transactions / argus-decisions in the emulator
+      AWS_REGION: ap-south-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      SCORING_URL: http://scoring:8080
+      CONTROL_API_KEY: ${ARGUS_STREAM_CONTROL_KEY:-local-control-key}   # the platform sends the same key
+      PRODUCER_SOURCE: ${PRODUCER_SOURCE:-mix}                         # synthetic | holdout | mix
+      DATASET_URI: /workspace/data/raw/parquet/transactions/holdout
+      EVENTS_PER_SEC: ${EVENTS_PER_SEC:-2}
+      ATTACK_EVERY_S: ${ATTACK_EVERY_S:-180}
+    ports: ["${ARGUS_BIND:-127.0.0.1}:${ARGUS_STREAM_PORT:-8003}:8003"]
+    volumes:
+      - ./training/data:/workspace/data:ro
+      - stream-data:/data
+    depends_on:
+      kinesis:
+        condition: service_healthy
     restart: unless-stopped
 
   # ------------------------------------------------------------------ training (CLI runs; the UI launches its own)
@@ -117,3 +164,6 @@ services:
     env_file: .env
     volumes: *training-volumes
     shm_size: "8gb"
+
+volumes:
+  stream-data:                    # the stream's analytics store (rebuilt from the decisions stream if lost)

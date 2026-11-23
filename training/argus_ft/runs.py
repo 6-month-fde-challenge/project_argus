@@ -13,6 +13,22 @@ from pathlib import Path
 SKIP = shutil.ignore_patterns("trainer", "report.json", "events.jsonl", "api")  # rebuilt / per-run state
 
 
+# everything the LLM-scorer branch writes (sft_scorer, distill_scorer, the scorer half of quantize and calibrate)
+LLM_SCORER_OUTPUTS = ["scorer_teacher", "scorer_student", "preds/teacher_*.npz", "preds/scorer_student*.npz",
+                      "calibration/teacher.json", "calibration/scorer_student*.json"]
+
+
+def drop_llm_scorer(run_dir: Path) -> list[str]:
+    """The gate took the HYBRID branch: remove LLM-scorer artefacts an earlier attempt or a reused run left in this
+    folder, so nothing downstream (quantize, calibrate, acceptance, registry, the API) can pick them up."""
+    removed = []
+    for pattern in LLM_SCORER_OUTPUTS:
+        for p in sorted(run_dir.glob(pattern)):
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+            removed.append(p.relative_to(run_dir).as_posix())
+    return removed
+
+
 def seed_from(source: Path, target: Path, stages_to_run: list[str]) -> dict:
     """Copy `source` into an empty `target`; return the report stages that are reused (not re-run)."""
     if not (source / "report.json").exists():

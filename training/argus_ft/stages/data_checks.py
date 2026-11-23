@@ -52,10 +52,17 @@ def run(ctx) -> dict:
     features = pd.read_parquet(fetch_tables(cfg.db_dir)["features"])
     sample = [r["prompt"] for r in sft["validation"][:2000]]
     lengths = np.array([len(x) for x in ctx.tokenizer(sample, add_special_tokens=False)["input_ids"]])
+    immature = {s: [r for r in rows if not D.label_mature(r)] for s, rows in sft.items()}
     return {
         "leakage": leakage,
         "time_spans": {s: [str(a), str(b)] for s, (a, b) in span.items()},
         "rows_and_fraud": {s: [len(rows), sum(r["fraud_label"] for r in rows)] for s, rows in sft.items()},
+        # labels mature 60 days after the transaction: rows whose label was not yet known when the next split starts
+        "label_maturity": {
+            "eligible_only": bool((cfg.get("label_maturity") or {}).get("eligible_only")),
+            **{s: {"rows_not_mature": len(rows), "fraud_not_mature": sum(r["fraud_label"] for r in rows)}
+               for s, rows in immature.items()},
+        },
         "missing_rates": {c: round(float(features[c].mean()), 4) for c in ("missing_customer_location", "missing_device")},
         "prompt_tokens": {
             "tokenizer": ctx.teacher_model, "p50": int(np.percentile(lengths, 50)), "p99": int(np.percentile(lengths, 99)),

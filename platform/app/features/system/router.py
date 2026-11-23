@@ -36,13 +36,15 @@ async def services(c: Container = Depends(get_container)):
             return False
         return await client.up(path)
 
-    scoring, mlflow, explainer = await asyncio.gather(probe("scoring", c.scoring, "/v1/health"),
-                                                      c.mlflow.up("/health", timeout=5.0),
-                                                      probe("explainer", c.explainer, "/health"))
+    scoring, mlflow, explainer, stream = await asyncio.gather(probe("scoring", c.scoring, "/v1/health"),
+                                                              c.mlflow.up("/health", timeout=5.0),
+                                                              probe("explainer", c.explainer, "/health"),
+                                                              c.stream.up("/live/health"))
     return {
         "platform": "ok", "docker": docker, "containers": containers,
         "scoring": "ok" if scoring else "down", "explainer": "ok" if explainer else "down",
         "mlflow": "ok" if mlflow else "down", "mlflow_url": c.settings.mlflow_public_url,
+        "stream": "ok" if stream else "down",
         "gpu_jobs": [j["run_name"] for j in c.jobs.active() if j["status"] == "running"],
     }
 

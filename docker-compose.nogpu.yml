@@ -1,0 +1,12 @@
+# Overlay for a machine without an NVIDIA GPU (a Mac, a laptop with another GPU, a CPU-only server).
+# The platform reserves the GPU only to show telemetry; without this overlay Docker refuses to start it there.
+# With it, the UI, platform API and MLflow run and the System page shows "no GPU". Training and serving still need an
+# NVIDIA GPU, as before.
+#
+#   .\argus.ps1 adds it automatically when nvidia-smi is missing. By hand:
+#   docker compose -f docker-compose.yml -f docker-compose.nogpu.yml up -d
+#   or in .env:  COMPOSE_FILE=docker-compose.yml;docker-compose.nogpu.yml   (with COMPOSE_PATH_SEPARATOR=; on Windows,
+#                or ':' as the separator on Linux / macOS)
+services:
+  platform:
+    deploy: !reset {}

@@ -70,7 +70,7 @@ const X = [0, 250, 500, 760, 960];
 const POS: Record<string, [number, number]> = {
   data_checks: [X[0], 0], xgboost: [X[1], 0], pilot: [X[2], 0], gate: [X[3], -25], hybrid: [1010, 20],
   cpt: [X[3] - 30, 220], sft_scorer: [X[2], 170], sft_explainer: [X[2], 275], dpo: [X[1], 220],
-  distill_scorer: [X[0], 420], distill_explainer: [X[0], 525], quantize: [X[1], 470], calibrate: [X[2], 470], registry: [X[3] - 30, 470],
+  distill_scorer: [X[0], 420], distill_explainer: [X[0], 525], quantize: [X[1], 470], calibrate: [X[2], 470], acceptance: [X[3] - 30, 470], registry: [X[4] + 30, 470],
 };
 const EDGES: [string, string, string, string, string?][] = [
   ["data_checks", "xgboost", "r", "l"], ["xgboost", "pilot", "r", "l"], ["pilot", "gate", "r", "l"],
@@ -79,7 +79,7 @@ const EDGES: [string, string, string, string, string?][] = [
   ["sft_scorer", "dpo", "ls", "rt"], ["sft_explainer", "dpo", "ls", "rt"],
   ["dpo", "distill_scorer", "b", "t"], ["dpo", "distill_explainer", "b", "t"],
   ["distill_scorer", "quantize", "r", "l"], ["distill_explainer", "quantize", "r", "l"],
-  ["quantize", "calibrate", "r", "l"], ["calibrate", "registry", "r", "l"],
+  ["quantize", "calibrate", "r", "l"], ["calibrate", "acceptance", "r", "l"], ["acceptance", "registry", "r", "l"],
 ];
 
 export default function PipelinePage() {

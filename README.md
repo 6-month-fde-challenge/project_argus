@@ -7,7 +7,10 @@ This folder holds the complete working solution:
 - **the model training ladder** from Part 3 (Figure 4): data checks, XGBoost baseline, pilot, week-8 gate, CPT,
   SFT, DPO, distillation, quantisation, calibration and registry;
 - **the Fraud Model API** from the CRD (Section 10) and the LLD: scoring, rules engine, explanations, audit;
-- **a web control plane** to launch training, watch it live, compare runs, browse MLflow and test the API.
+- **a web control plane** to launch training, watch it live, compare runs, browse MLflow and test the API;
+- **a real-time stream** (Amazon Kinesis → Fraud Model API → decision → action) with live analytics;
+- **deployment** to a GPU VM (Hyperstack) and AWS ap-south-1 (Terraform, one-command operations, GitHub Actions
+  CI/CD): see [deploy/README.md](deploy/README.md).
 
 **Everything runs in Docker.** Nothing is installed on the host except Docker Desktop and the NVIDIA driver.
 
@@ -18,7 +21,7 @@ This folder holds the complete working solution:
 | What was asked | [1. The client brief](#1-the-client-brief) · [2. Requirements coverage](#2-requirements-coverage) |
 | Design | [3. System design](#3-system-design) · [4. Training ladder](#4-training-ladder-design) · [5. Data and features](#5-data-and-features) · [6. Scoring path](#6-scoring-path-design) · [7. Control plane and UI](#7-control-plane-and-ui-design) |
 | API design | [8. Fraud Model API](#8-api-design-fraud-model-api-scoring-8080) · [9. Platform API](#9-api-design-platform-api-8090apiv1) · [10. File contracts](#10-file-contracts) |
-| Running it | [11. Prerequisites](#11-prerequisites) · [12. Quick start](#12-quick-start) · [13. Services](#13-services-and-ports) · [14. UI](#14-the-ui) · [15. Training](#15-training) · [16. Serving](#16-serving-and-api-testing) |
+| Running it | [11. Prerequisites](#11-prerequisites) · [11a. Another machine / cloud](#11a-another-machine-or-another-cloud) · [12. Quick start](#12-quick-start) · [13. Services](#13-services-and-ports) · [14. UI](#14-the-ui) · [15. Training](#15-training) · [16. Serving](#16-serving-and-api-testing) · [16a. Real-time stream](#16a-real-time-stream) · [Deployment](deploy/README.md) |
 | Operating it | [17. Logs](#17-logs-where-to-look) · [18. Where to change things](#18-where-to-change-things) · [19. Tests](#19-tests) · [20. Troubleshooting](#20-troubleshooting) |
 | Results and plan | [21. Results](#21-results-so-far) · [22. Local vs production](#22-local-demo-vs-production) · [23. Plan](#23-plan) · [24. Risks](#24-risks-and-mitigations) · [25. Folder layout](#25-folder-layout) · [26. Demo video](#26-demo-video) |
 
@@ -80,25 +83,29 @@ Section numbers below such as "CRD 10.2" or "LLD 4.1" point into those documents
 **Scope of this solution.** It is the delivery team's working build of that system. It covers the full offline
 ladder and the online scoring path, sized to run on a 4 GB laptop GPU. A production profile for one A100 80GB uses
 the models named in Part 3. AWS infrastructure (EKS, Redis, Aurora, Terraform, mTLS) is out of scope for this
-build; section 22 maps each local stand-in to its production counterpart.
+build's local mode; section 22 maps each local stand-in to its production counterpart, and
+[deploy/README.md](deploy/README.md) takes the solution to a GPU VM and AWS ap-south-1 (Terraform, Kinesis, Fargate,
+S3 audit, CloudWatch, CI/CD).
 
 ## 2. Requirements coverage
 
 | Requirement | How this build meets it | Where |
 |---|---|---|
 | FR-ML-01 XGBoost baseline first | stage 1 trains it on the engineered DB features; every later model is compared to it | `training/argus_ft/stages/xgboost_baseline.py` |
-| CRD 9.1 base model selection (≥ 3 models) | stage 2 pilots 3 model families × 2 prompt formats with the same LoRA budget and ranks them on validation PR-AUC | `stages/pilot.py`, `pilot.candidates` |
+| CRD 9.1 base model selection (≥ 3 models) | stage 2 pilots 3 model families × 2 prompt formats with the same LoRA budget and ranks them on the earlier half of its validation rows (the gate judges the winner on the later half) | `stages/pilot.py`, `pilot.candidates` |
 | FR-FE-07 two serialisation formats | `fmt-v1` (CRD 8.2) and `fmt-v2` (adds a `[SUMMARY]` line) are both piloted | `argus_ft/data.py` |
 | Week-8 go/no-go, hybrid fallback | the `gate` stage measures PR-AUC uplift against `gate.min_uplift: 0.03` (OBJ-04); "no" skips the LLM scorer stages and XGBoost scores | `stages/gate.py` |
 | CRD 9.1 CPT, SFT, DPO, distillation, quantisation | stages 3 to 7, LoRA / QLoRA throughout | `stages/*.py` |
 | FR-ML-03 probability from a classification head | the SFT scorer has a fraud head plus 8 reason-code heads on the final hidden state; no free-text parsing | `stages/common.py`, `MultiHeadTrainer` |
 | FR-ML-04 class imbalance | genuine rows down-sampled (`neg_per_pos`) **and** per-head `pos_weight` in the BCE loss | `stages/common.py` |
 | FR-ML-05 time-based split | train Jan–Oct 2025, validate Nov–Dec 2025, holdout Jan–Feb 2026; stage 0 fails the run if splits overlap | `stages/data_checks.py` |
+| FR-ML-05 label maturity (strict backtest) | stage 0 reports rows whose label was not yet known when the next split starts (labels mature after 60 days); `label_maturity.eligible_only: true` trains the scorers without them | `argus_ft/data.py`, `context.py` |
+| CRD 15 acceptance gate 1: offline accuracy on the holdout | stage 9 scores the untouched holdout with the frozen stage-8 calibrators and checks OBJ-01/02/03/04/08/09/10 → GO / NO-GO; recommended REVIEW / BLOCK thresholds for the recall / precision targets | `stages/acceptance.py` |
 | FR-ML-06 calibration | stage 8 fits Platt and isotonic per scorer and keeps the lower ECE | `stages/calibrate.py` |
 | FR-ML-07 grounded, schema-constrained explanations | JSON schema + grounding guard (every number must appear in the input) + reason-code consistency check, with a reason-code template as the fallback | `scoring_api/argus_api/explainer.py`, `argus_ft/grounding.py` |
 | FR-ML-08 version every checkpoint | the registry stage logs data snapshot, prompt format, config, metrics and models to MLflow | `stages/registry.py` |
 | FR-ML-11 fairness by age band and region | stage 8 reports error rates per band and region and flags gaps > 20% relative | `stages/calibrate.py` |
-| FR-ML-12 threshold analysis | stage 8: precision, recall and review volume at the policy cut-offs and at "top 12,000 a day" (OBJ-09) | `report.md` → calibrate |
+| FR-ML-12 threshold analysis | stage 8: precision, recall and review volume at the policy cut-offs and at "top 12,000 a day" (OBJ-09); stage 9 adds PR / ROC curves and target-driven thresholds on the holdout | `report.md` → calibrate, acceptance |
 | CRD 9.3 reason codes R01–R08 | a code is returned only when its feature flag is true (and, for the LLM, its head ≥ 0.5); at most 3 | `scoring_api/argus_api/scorer.py` |
 | CRD 10.1–10.3 API contract | `POST /v1/fraud/score`, request and response field for field | section 8 |
 | CRD 10.4 decision policy | 0.30 / 0.60 / 0.85 → LOW / MEDIUM / HIGH / CRITICAL → ALLOW / ALLOW / REVIEW / BLOCK | `scoring_api/argus_api/rules.py` |
@@ -115,7 +122,13 @@ build; section 22 maps each local stand-in to its production counterpart.
 | NFR-04 optimised inference server | the explainer runs on vLLM with dynamic batching | `docker-compose.yml` → `explainer` |
 | CRD 13 prompt-injection robustness | free text (city) is NFKC-normalised, reduced to `[A-Za-z0-9 .,-]` and capped at 32 characters before it reaches a prompt (LLD 6.2) | `schemas.sanitise` |
 | MLOPS-07 fast rollback | switch the served run at runtime: `POST /admin/v1/models/{run}/activate` (no restart) | `scoring_api/argus_api/deployments.py` |
+| MLOPS-06 shadow before promotion | a second trained run scores every stream transaction too (`POST /v1/fraud/shadow/{run}`: same features, calibrator and rules, no explanation, no audit, never decides); the Live stream page compares it with the live model (agreement, recall, precision at BLOCK) | `app.py`, `stream/argus_stream/processor.py` |
 | MLOPS-10 XGBoost kept warm | every run keeps its XGBoost model; a HYBRID run serves it | stage 1 |
+| OBJ-10 p99 ≤ 250 ms | stage 9 times the served scorer in-process; `argus_api.loadtest` measures the API end to end at a fixed arrival rate; on AWS a CloudWatch alarm watches the p99 the stream sees | `stages/acceptance.py`, `argus_api/loadtest.py` |
+| FR-API-01 fail-open (caller side) | the stream applies it when the API cannot answer: approve below ₹10,000, otherwise REVIEW (`decision_source: FAIL_OPEN`), behind a circuit breaker | `stream/argus_stream/processor.py` |
+| FR-API-03 / NFR-11 audit, 5 years | every stream decision goes to the Kinesis decisions stream; Firehose archives it to a versioned S3 bucket (Glacier after 90 days, 5-year expiry) | `deploy/terraform/storage.tf` |
+| NFR-07 no demo secrets on a reachable host | `ARGUS_SCORING_TOKEN` / `ARGUS_SCORING_ADMIN_TOKEN` override the profile tokens (generated on the GPU VM); constant-time checks | `scoring_api/argus_api/auth.py` |
+| NFR-13, MLOPS-01..04 IaC, CI/CD, monitoring | Terraform (VPC, Kinesis, Firehose, Fargate, SSM, SNS, CloudWatch alarms + dashboard), GitHub Actions (tests on every push, OIDC deploy of `main`) | `deploy/`, `.github/workflows/` |
 
 ## 3. System design
 
@@ -126,7 +139,8 @@ build; section 22 maps each local stand-in to its production counterpart.
                      ▼                                      ▼                         ▼
           argus-job-<id> (training, GPU)        scoring :8080 (Fraud Model API) ─► explainer :8000 (vLLM, AWQ)
           writes training/outputs/<run>/        serves one finished run              (profile "serve")
-                     │
+                     │                                      ▲
+                     │                       stream :8003 ──┘ Kinesis (emulator locally) → score → action (profile "stream")
                      └──► mlflow :5000 (tracking + model registry, SQLite under training/outputs/mlruns)
 ```
 
@@ -159,7 +173,7 @@ containers through the Docker socket, and proxies the scoring API for the UI. Co
 0 data checks → 1 XGBoost → 2 pilot (3 models × 2 prompt formats) → week-8 gate ──no──► HYBRID: XGBoost scores
                                                                           │ yes
 3 CPT → 4 SFT (4a scorer heads, 4b explainer) → 5 DPO → 6 distil (6a scorer, 6b explainer)
-      → 7 quantise (FP8 scorer, AWQ 4-bit explainer) → 8 calibrate → registry (MLflow)
+      → 7 quantise (FP8 scorer, AWQ 4-bit explainer) → 8 calibrate → 9 acceptance (holdout) → registry (MLflow)
 ```
 
 On "no", the gate skips only the LLM *scorer* stages (4a, 6a). The explainer branch still runs, because in the
@@ -168,9 +182,9 @@ hybrid the LLM explains.
 | # | Stage | What it does | Method (local demo → A100 profile) | Output |
 |---|---|---|---|---|
 | 0 | `data_checks` | Leakage tests: validation before holdout in time, and no training set (SFT, gold, DPO, CPT) contains a validation or holdout transaction (DR-02). Data-quality report. A failed check fails the run. | – | `data_checks/` |
-| 1 | `xgboost` | Baseline on the DB features (FE-01..FE-10); the bar to beat (FR-ML-01). | XGBoost 400 trees, depth 6 | `xgboost/` |
-| 2 | `pilot` | Each candidate × each prompt format gets the same short LoRA run; ranked on validation PR-AUC. The winner becomes the teacher and the explainer base. | Qwen2.5-0.5B, SmolLM2-360M, h2o-danube3-500m → Qwen2.5-7B, Llama-3.2-3B, Gemma-2-2B | `pilot/` |
-| – | `gate` | Week 8: pilot winner PR-AUC − XGBoost PR-AUC ≥ 0.03? `mode: auto` follows the measurement; `hybrid` / `llm` force a branch for demos. | – | `gate.json` |
+| 1 | `xgboost` | Baseline on the DB features (FE-01..FE-10); the bar to beat (FR-ML-01). Early stopping on the earlier half of validation (the calibration half), so the later half where scorers are judged stays out-of-sample. | XGBoost up to 3,000 trees, early stopping (patience 200), depth 5, √(genuine/fraud) class weight | `xgboost/` |
+| 2 | `pilot` | Each candidate × each prompt format gets the same short LoRA run; ranked on the PR-AUC of the earlier half (by time) of its validation rows. The winner becomes the teacher and the explainer base. | Qwen2.5-0.5B, SmolLM2-360M, h2o-danube3-500m → Qwen2.5-7B, Llama-3.2-3B, Gemma-2-2B | `pilot/` |
+| – | `gate` | Week 8: pilot winner PR-AUC − XGBoost PR-AUC ≥ 0.03, on the later half of the pilot rows (not used to pick the winner)? `mode: auto` follows the measurement; `hybrid` / `llm` force a branch for demos. HYBRID removes any LLM-scorer artefact left in the run folder. | – | `gate/decision.json` |
 | 3 | `cpt` | Continued pre-training on the fraud text corpus (case notes, chargeback narratives, playbooks, circulars). | LoRA, causal LM | `cpt/` |
 | 4a | `sft_scorer` | Teacher scorer: fraud head + 8 reason heads, weighted BCE. | QLoRA 4-bit → LoRA | `teacher_scorer/` |
 | 4b | `sft_explainer` | Teacher explainer: JSON `{reason_codes, explanation}` on the gold cases. | LoRA | `teacher_explainer/` |
@@ -179,7 +193,8 @@ hybrid the LLM explains.
 | 6b | `distill_explainer` | Small explainer student trained on the DPO teacher's answers. | SmolLM2-135M-Instruct → Qwen2.5-1.5B-Instruct | `explainer_student/` |
 | 7 | `quantize` | FP8 scorer student; AWQ 4-bit explainer student (served by vLLM). | llm-compressor | `scorer_student/fp8/`, `explainer_student/awq/` |
 | 8 | `calibrate` | Platt vs isotonic per scorer, ECE, PR-AUC, threshold analysis, policy simulation, fairness by age band and region, explainer evaluation (valid JSON, schema, reason F1, guard). | – | `calibration/` |
-| – | `registry` | Logs data snapshot, prompt format, config, metrics and models to MLflow, and registers the servable scorer and explainer. | MLflow | MLflow model versions |
+| 9 | `acceptance` | The served scorer (and XGBoost) once on the untouched holdout with the frozen stage-8 calibrator: PR-AUC, ROC-AUC, ECE, policy thresholds vs recommended thresholds (chosen on validation for recall ≥ 0.85 / precision ≥ 0.70), PR / ROC curves, p50 / p99 scoring latency, OBJ checklist → **GO / NO-GO**. Nothing is tuned on the holdout. | – | `acceptance/verdict.json` |
+| – | `registry` | Logs data snapshot, prompt format, config, metrics and models to MLflow, and registers the servable scorer and explainer with a status: `candidate` (a measured run with a holdout GO), `rejected` (NO-GO), `unverified` (no acceptance) or `demo` (not a measured run). The scorer version carries the holdout verdict (tag `acceptance`). | MLflow | MLflow model versions |
 
 **Shared training settings** (`efficiency:` in `base.yaml`):
 
@@ -267,7 +282,7 @@ validate + sanitise (400 on error)
 | Explainer | vLLM serving the AWQ explainer student | vLLM, AWQ 1.5B explainer |
 | Rules config | `training/outputs/_scoring/rules_config.json`, re-read when the file changes | Aurora + 30 s hot reload |
 | Audit | `training/outputs/_scoring/audit.jsonl` | 5-year immutable store (NFR-11) |
-| Deployments | several runs loaded with LRU eviction, switch at runtime | registry-approved versions only, 7-day shadow |
+| Deployments | several runs loaded with LRU eviction, switch at runtime; a shadow run scores alongside the live one | registry-approved versions only, 7-day shadow |
 
 **Time budgets.**
 
@@ -284,10 +299,10 @@ validate + sanitise (400 on error)
 - **`app/infra`:** one adapter per outside system:
   - run folders and event tailing (`runs_repo`, `events`);
   - job store and Docker job runner (`job_store`, `job_runner`);
-  - profiles, NVML GPU telemetry, HTTP clients for scoring and MLflow;
+  - profiles, NVML GPU telemetry, HTTP clients for scoring, MLflow and the stream service;
   - client documents and diagrams.
 - **`app/features/<area>`:** one router + service per area: `jobs`, `runs`, `profiles`, `registry`, `scoring`,
-  `system`, `knowledge`. Every router is mounted under `/api/v1`.
+  `stream`, `system`, `knowledge`. Every router is mounted under `/api/v1`.
 
 **Run state.**
 
@@ -302,7 +317,8 @@ validate + sanitise (400 on error)
   GPU job at a time).
 - **The job container.** It is started as `argus-job-<id>` with labels `argus.job` and `argus.run`. It gets the
   host paths of the platform's own mounts, plus `SUPABASE_URL`, `SUPABASE_KEY` and `HF_TOKEN` from `.env`.
-- **Cancelling** stops the container. The run keeps everything written so far.
+- **Cancelling** stops the container. The run keeps everything written so far. Job status changes are
+  compare-and-set: a job cancelled while its container is starting is stopped, never marked running.
 
 **Frontend** (`frontend/`, React 19 + Vite + TypeScript, TanStack Query, Tailwind, Radix):
 
@@ -321,6 +337,7 @@ Interactive docs: http://localhost:8080/docs. The contract is CRD 10, validated 
 | Method and path | Auth | Purpose |
 |---|---|---|
 | `POST /v1/fraud/score` | `Bearer demo-service-token` | score one transaction (CRD 10.2 → 10.3) |
+| `POST /v1/fraud/shadow/{run}` | service token | the same transaction scored by another trained run, for comparison only: no explanation, no audit, the active run stays active (MLOPS-06) |
 | `GET /v1/health` | – | service, scorer, explainer, feature store and config versions (FR-API-04) |
 | `GET /admin/v1/thresholds` | `Bearer demo-admin-token` | current global and per-MCC thresholds |
 | `POST /admin/v1/thresholds` | admin | change thresholds (two-person approval) |
@@ -466,6 +483,7 @@ The UI calls these through nginx, as `/api/v1/...` on port 3000. Interactive doc
 | runs | `GET /runs`, `GET /runs/{run}` (ladder, status, results), `GET /runs/{run}/report.md`, `GET /runs/{run}/series` (loss / metric series), `GET /runs/{run}/artifacts`, `GET /runs/{run}/files/{path}`, `GET /runs/{run}/events?after=`, `GET /runs/{run}/events/stream` (SSE) |
 | compare | `GET /compare?runs=a,b` (up to 4 runs) |
 | registry | `GET /registry/info`, `GET /registry/models`, `GET /registry/runs` (MLflow REST) |
+| stream | `GET /stream/state`, `GET /stream/summary?minutes=`, `GET /stream/events?limit=&since=`, `POST /stream/producer` (`{"action": "start" or "stop", "rate": 2}`), `POST /stream/inject` (`{"n": 20, "fraud_type": ...}`), `POST /stream/shadow` (`{"run": "<run>" or null}`); the control key is added server-side |
 | scoring | `POST /scoring/score`, `GET /scoring/health`, `GET /scoring/samples`, `GET /scoring/models`, `POST /scoring/models/{run}/activate`, `GET/POST /scoring/admin/thresholds`, `GET/POST/DELETE /scoring/admin/lists/{name}`, `GET /scoring/admin/decisions/{id}`, `GET /scoring/admin/decisions`, `GET /scoring/admin/changelog` |
 | knowledge | `GET /data/overview` (data card, quality report, splits), `GET /docs/documents`, `GET /docs/documents/{name}` (docx → HTML), `GET /docs/diagrams`, `GET /docs/diagrams/{name}` |
 
@@ -548,11 +566,30 @@ Newest first:
 | Need | Notes |
 |---|---|
 | Docker Desktop (WSL 2 backend) with GPU support | `docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi` must print your GPU |
-| NVIDIA GPU, bf16-capable (Ampere or newer) | local demo sized for a 4 GB RTX 3050 Laptop; production profile for an A100 80GB |
+| NVIDIA GPU, bf16-capable (Ampere or newer) | local demo sized for a 4 GB RTX 3050 Laptop; production profile for an A100 80GB. Older GPUs fall back to fp32 (slower, more memory). Without an NVIDIA GPU the UI, platform and MLflow still run (section 11a); training and serving do not |
 | `.env` (this folder) | copy `.env.example` to `.env`: `SUPABASE_URL`, `SUPABASE_KEY` (data sync); optional `HF_TOKEN` (gated models in production). Git-ignored. |
 | Disk | about 70 GB: training image 13 GB (scoring shares its layers), vLLM image 35 GB, build cache, models and outputs about 16 GB |
 
 `.env` lives in this folder next to `docker-compose.yml`. The client documents (`client_docs/`, `day_wise/`) stay in `01_argus/`, one level up; compose mounts them read-only for the Docs page.
+
+## 11a. Another machine or another cloud
+
+Nothing is tied to one machine: everything machine-specific is set per machine, mostly in `.env`.
+
+| Differs per machine | Where it is set |
+|---|---|
+| Secrets, tokens, keys | `.env` (copy `.env.example`; git-ignored) |
+| A port already taken | `ARGUS_UI_PORT`, `ARGUS_API_PORT`, `ARGUS_MLFLOW_PORT`, `ARGUS_SCORING_PORT`, `ARGUS_EXPLAINER_PORT`, `ARGUS_STREAM_PORT` in `.env`. Only the host side changes: containers keep talking on their internal ports, and `argus.ps1`, the VM scripts, the MLflow link, the CORS origins and the SSH tunnel follow the settings |
+| No NVIDIA GPU (Mac, other vendor) | `argus.ps1` detects it and adds `docker-compose.nogpu.yml`: the UI, platform and MLflow start, the System page shows "no GPU". By hand: `COMPOSE_FILE=docker-compose.yml;docker-compose.nogpu.yml` (+ `COMPOSE_PATH_SEPARATOR=;`) |
+| GPU size | the training profile: `local_demo` / `demo_*` for small cards, `prod_a100` for an A100, any value per run with `--set` or the Launch page |
+| API latency budget | `SCORING_CONFIG` in `.env` (`configs/local_demo.yaml` or `configs/prod_a100.yaml`) |
+| Public host vs laptop | every port binds to `127.0.0.1` by default. `ARGUS_BIND=0.0.0.0` opens the UI, platform, MLflow, vLLM and stream (no login); `ARGUS_SCORING_BIND=0.0.0.0` opens the token-protected Fraud Model API (`setup_vm.sh` sets it on the GPU VM) |
+| Slow PyPI | `PIP_INDEX_URL` mirror at build time |
+| Folder paths, Windows vs Linux | nothing: compose uses relative paths and UI-launched jobs reuse the platform's own mounts |
+
+**Other clouds.**
+- **The GPU side** (`deploy/hyperstack/`) is plain Ubuntu + Docker + NVIDIA. It runs on any Ubuntu GPU VM (Hyperstack, Lambda, an EC2 GPU instance, on-premises); only the ephemeral-disk check is Hyperstack-specific.
+- **The AWS side** (`deploy/terraform/`, Kinesis in `stream/argus_stream/bus.py`) is AWS-specific by design: the CRD puts the system in VKPayments' AWS account. Another cloud needs its own infrastructure code and an equivalent event bus (Pub/Sub, Event Hubs) behind the same producer / reader interface.
 
 ## 12. Quick start
 
@@ -570,7 +607,7 @@ yourself instead. `.\argus.ps1` with no arguments lists the actions.
 
 | Action | Plain docker command |
 |---|---|
-| `build` | `docker compose build trainer; docker compose --profile serve build scoring; docker compose build platform frontend` |
+| `build` | `docker compose build trainer; docker compose --profile serve build scoring; docker compose build platform frontend; docker compose --profile stream build stream` |
 | `up` | `docker compose up -d` |
 | `serve [run]` | `$env:RUN_NAME="<run>"; $env:EXPLAINER_RUN="<run>"; docker compose --profile serve up -d scoring explainer` |
 | `unserve` | `docker compose --profile serve stop scoring explainer` |
@@ -579,8 +616,12 @@ yourself instead. `.\argus.ps1` with no arguments lists the actions.
 | `demo` | `docker compose --profile serve exec scoring python -m argus_api.demo --run <active run> --url http://localhost:8080` |
 | `logs [service or job id]` | `docker compose logs -f <service>` / `docker logs -f argus-job-<id>` |
 | `status` | `docker compose --profile serve ps -a` + job containers + images |
-| `test` | all three test suites in containers (section 19) |
-| `down` | `docker compose --profile serve --profile job down` (files on disk are kept) |
+| `test` | every test suite in containers (section 19) |
+| `loadtest [rps] [sec]` | `docker compose --profile serve exec scoring python -m argus_api.loadtest --url http://localhost:8080 --rps 5 --duration 60` |
+| `stream [stop]` | `docker compose --profile stream up -d kinesis stream` |
+| `prefetch <profile>` | `docker compose run --rm --no-deps trainer python -m argus_ft.prefetch --config configs/<profile>.yaml` |
+| `aws <command>` | `python deploy/ops.py <command>` ([deploy/README.md](deploy/README.md)) |
+| `down` | `docker compose --profile serve --profile stream --profile job down` (files on disk are kept) |
 
 ## 13. Services and ports
 
@@ -591,6 +632,8 @@ yourself instead. `.\argus.ps1` with no arguments lists the actions.
 | mlflow | http://localhost:5000 | `argus-training` | – | `up` |
 | scoring | http://localhost:8080/docs | `argus-scoring` (built on `argus-training`) | yes | `serve` (profile `serve`) |
 | explainer | http://localhost:8000/v1/models | `vllm/vllm-openai:v0.33.0` | yes | `serve` (profile `serve`) |
+| stream | http://localhost:8003/live/docs | `argus-stream` | – | `stream` (profile `stream`) |
+| kinesis | – (inside compose) | `motoserver/moto:5.2.4` (local Kinesis emulator) | – | `stream` (profile `stream`) |
 | training job | – | `argus-training`, container `argus-job-<id>` | yes | the UI (Launch) or `train` |
 
 **One GPU, one owner at a time.**
@@ -606,12 +649,13 @@ yourself instead. `.\argus.ps1` with no arguments lists the actions.
 |---|---|
 | **Overview** | headline numbers of the latest runs, active jobs, services, GPU |
 | **Launch** | pick a profile, name the run, edit parameters (only changed values become overrides), choose stages, reuse another run's artefacts, preview the exact command, start |
-| **Runs** | every run with status and progress; a run page has the live ladder, loss charts per stage (SSE, resumes after reconnect), container logs, per-stage results (pilot table, gate, calibration, fairness, explainer samples), artefacts and `report.md` |
+| **Runs** | every run with status and progress; a run page has the live ladder, loss charts per stage (SSE, resumes after reconnect), container logs, per-stage results (pilot table, gate, calibration, fairness, explainer samples, holdout acceptance with PR / ROC curves and the GO / NO-GO checklist), artefacts and `report.md` |
 | **System** | services (start/stop scoring + explainer), GPU telemetry, the job queue (cancel) |
 | **Pipeline** | Figure 4 as an interactive graph; click a stage for what it does and its latest result |
 | **Compare** | up to 4 runs side by side (e.g. `argus_demo_hybrid` vs `argus_demo_llm_scorer`) |
 | **Registry** | registered models and versions from MLflow, plus the full MLflow UI embedded |
 | **Scoring** | API playground with ready samples (CRD worked example, known fraud, genuine, hard rule, invalid), deployments (switch the served run), recent decisions with async explanations |
+| **Live stream** | the real-time path: start / stop traffic, inject an attack wave, pipeline status (producer → Kinesis → Fraud Model API → action), decisions over time, reason codes, live recall / precision at BLOCK against ground truth, API p99, fail-open count, live feed; a **shadow run** picker with the live-vs-shadow comparison (MLOPS-06) |
 | **Rules & policy** | thresholds (global and per MCC, two-person approval), blocked devices, allowlisted customers, change log |
 | **Dataset** | data card, quality report, splits |
 | **Docs & diagrams** | the client documents (`.docx` rendered in the browser) and the architecture diagrams |
@@ -652,14 +696,29 @@ CLI runs write the same `events.jsonl`, so they appear live in the UI too.
 - `auto` follows the measured week-8 decision.
 - `hybrid` / `llm` force a branch. The report still shows the measured decision.
 
+**Measured vs demo runs** (`training/argus_ft/branch.py`, one rule for acceptance, the registry, the scoring API and
+the UI). A run is a *measured* run only when its own config ran the gate in `auto` mode, it has the gate's decision
+file from an `auto` gate (a reused run can carry a forced one), and what it serves matches what the gate measured
+(FP8 LLM scorer only on an LLM decision, XGBoost only on HYBRID). Anything else is a *demo*: never promotable, shown
+as "demo" in the UI with the reason, and refused by a profile with `api.allow_forced_runs: false` (production).
+`smoke`, `demo_hybrid` and `demo_llm_scorer` are demos by design; `local_demo` and `prod_a100` are measured.
+
 **Overrides.** Any value can be overridden per run: `--set pilot.max_steps=30` on the CLI, or the parameter editor
 in **Launch**.
+
+**Acceptance and label maturity** (`base.yaml`): `acceptance.targets` holds the CRD 4 targets stage 9 checks (OBJ-01
+recall 0.85, OBJ-02 precision at BLOCK 0.70, OBJ-03 PR-AUC 0.80, OBJ-04 uplift 0.03, OBJ-08 false declines 1.4%,
+OBJ-09 12,000 REVIEW a day, OBJ-10 p99 250 ms). `label_maturity.eligible_only: true` is the strict backtest: on this
+dataset it drops 14,265 training rows, 96 of them fraud, whose labels were not yet known when validation starts.
+
+**Pre-download models** before a long run (and check gated access): `.\argus.ps1 prefetch prod_a100`.
 
 ### What a run produces (`training/outputs/<run>/`)
 
 | File | Contents |
 |---|---|
-| `report.json` / `report.md` | every stage's metrics; written at the end of every run, also failed ones |
+| `report.json` / `report.md` | every stage's metrics; written at the end of every run, also failed ones; `report.md` ends with the holdout checklist |
+| `acceptance/verdict.json` | GO / NO-GO, the failing objectives, every checked objective with value and target |
 | `events.jsonl` | the live event stream the UI reads (section 10.1) |
 | `xgboost/`, `pilot/`, `teacher*/`, `scorer_student/fp8/`, `explainer_student/awq/`, `calibration/` | models and artefacts per stage |
 | `api/` | outputs of the scoring demo for this run (`demo_results.json`) |
@@ -688,6 +747,11 @@ Invoke-RestMethod -Method Post http://localhost:8080/v1/fraud/score -Headers $h 
 
 **Through the platform** (no token needed; the UI uses this): `POST http://localhost:8090/api/v1/scoring/score`.
 
+**Load test (OBJ-10).** `.\argus.ps1 loadtest 20 120` sends 20 requests a second for 2 minutes (open loop: the
+schedule does not slow down when the API does), replaying holdout transactions plus the CRD example, and writes
+p50 / p95 / p99, status codes and decisions to `training/outputs/<run>/api/loadtest.json`. Add `--fresh-time` against
+a profile that enforces the ±15 min window.
+
 **What `demo` exercises:**
 
 - the CRD worked example;
@@ -696,6 +760,25 @@ Invoke-RestMethod -Method Post http://localhost:8080/v1/fraud/score -Headers $h 
 - invalid requests (400);
 - a threshold change with two-person approval;
 - the async explanation lookup.
+
+## 16a. Real-time stream
+
+```powershell
+.\argus.ps1 serve argus_demo_llm_scorer   # the stream scores with whatever the Fraud Model API serves
+.\argus.ps1 stream                        # Kinesis emulator + stream service; UI -> Live stream -> Start traffic
+```
+
+- **Flow.** The producer publishes CRD 10.2 transactions to the Kinesis stream `argus-transactions`: synthetic
+  traffic with fraud rings (account takeover, card testing, mule accounts, impossible travel) mixed with replays of
+  the labelled holdout (`PRODUCER_SOURCE=synthetic|holdout|mix`). The scorer calls `POST /v1/fraud/score` for each
+  one and publishes the decision with its action (`APPROVE`, `APPROVE_STEP_UP`, `HOLD_FOR_REVIEW`, `BLOCK_AND_ALERT`)
+  to `argus-decisions`.
+- **API down.** The caller-side fail-open rule of FR-API-01 decides (approve below ₹10,000, otherwise REVIEW), behind a
+  circuit breaker, so the stream never stalls.
+- **Ground truth.** Every event carries its true label; it is never sent to the API. The Live stream page measures live
+  recall and precision at BLOCK with it.
+- **On AWS** the same image runs on Fargate against real Kinesis, with Firehose archiving decisions to S3 and SNS /
+  CloudWatch alarms: [deploy/README.md](deploy/README.md).
 
 ## 17. Logs: where to look
 
@@ -708,6 +791,8 @@ Invoke-RestMethod -Method Post http://localhost:8080/v1/fraud/score -Headers $h 
 | Platform / frontend / MLflow | `docker compose logs -f platform` (or `frontend`, `mlflow`) |
 | Scoring API / vLLM | `docker compose --profile serve logs -f scoring` (or `explainer`) |
 | Every scoring decision | `training/outputs/_scoring/audit.jsonl` (UI → Scoring → *Recent decisions*) |
+| The stream | `docker compose --profile stream logs -f stream` (UI → Live stream); on AWS: CloudWatch `/ecs/argus-prod/stream` |
+| GPU VM scripts | `training/outputs/_logs/{pipeline,train}.log` on the VM |
 | Rule / threshold / deployment changes | `training/outputs/_scoring/changelog.jsonl` (UI → Rules & policy) |
 | Job queue state | `training/outputs/_platform/jobs.json` (UI → System) |
 | Experiments, metrics, model versions | MLflow http://localhost:5000 (UI → Registry) |
@@ -729,6 +814,9 @@ Invoke-RestMethod -Method Post http://localhost:8080/v1/fraud/score -Headers $h 
 | UI (new page) | create `frontend/src/features/<name>/index.ts` exporting a `FeatureDef`, add it to `src/app/features.ts` | `docker compose up -d --build frontend` |
 | Ports, GPU share for vLLM, mounted folders | `docker-compose.yml` (`VLLM_GPU_UTIL`, `RUN_NAME`, `EXPLAINER_RUN` env vars) | `docker compose up -d` |
 | Platform settings (URLs, tokens, image names) | `ARGUS_*` env vars on the `platform` service (see `platform/app/core/config.py`) | `docker compose up -d platform` |
+| Acceptance targets, strict backtest | `acceptance:` / `label_maturity:` in `training/configs/base.yaml` | next run |
+| Stream traffic, fraud patterns, actions | `stream/argus_stream/` (`generator.py`, `processor.py`, `__init__.py`); env in `docker-compose.yml` → `stream` | `docker compose --profile stream up -d --build stream` |
+| GPU VM / AWS deployment | `deploy/hyperstack/*.sh`, `deploy/terraform/*.tf`, `deploy/ops.py` | [deploy/README.md](deploy/README.md) |
 
 ## 19. Tests
 
@@ -737,9 +825,15 @@ Invoke-RestMethod -Method Post http://localhost:8080/v1/fraud/score -Headers $h 
 ```
 | Suite | Runs in | Covers |
 |---|---|---|
-| platform (pytest, 56 tests) | `argus-platform:test` | event tailing (offsets, partial/corrupt lines), live-state fold, interrupted runs, path traversal, profiles (extends, overrides, loops), job validation, FIFO GPU scheduler, cancel, every HTTP route incl. SSE streams and upstream-down errors |
-| scoring (pytest, 51 tests) | `argus-scoring` | CRD request validation edge cases, sanitising, policy boundaries, hard rules, allowlist cap, MCC overrides, two-person approval, hot reload / corrupt config, reason-code rules, explanation consistency guard, deployments (LRU) |
-| frontend (vitest, 25 tests) | `node` build stage | formatters, null-safe ratios, overrides diff, API client errors, UI states, `Button asChild`, feature registry |
+| platform (pytest, 65 tests) | `argus-platform:test` | event tailing (offsets, partial/corrupt lines), live-state fold, interrupted runs, path traversal, profiles (extends, overrides, loops), job validation, FIFO GPU scheduler, cancel (incl. cancel during launch), the measured / demo run rule, every HTTP route incl. SSE streams and upstream-down errors |
+| scoring (pytest, 65 tests) | `argus-scoring` | CRD request validation edge cases, sanitising, policy boundaries, hard rules, allowlist cap, MCC overrides, two-person approval, hot reload / corrupt config, reason-code rules, explanation consistency guard, deployments (LRU), auth before validation, admission control, shadow run, forced runs refused in production, the run's own prompt cap |
+| frontend (vitest, 27 tests) | `node` build stage | formatters, null-safe ratios, overrides diff, API client errors, UI states, `Button asChild`, feature registry, a page bundle missing after a redeploy (reload once, never a blank page) |
+| training logic (pytest, 24 tests) | `argus-training` (`trainer`) | thresholds for recall / precision targets, curves, saved calibrators as served, review capacity, per-code F1, prompt formats, label maturity, every profile resolves, the acceptance checklist and report, the measured-run rule, stale LLM-scorer cleanup, registry status, tied thresholds |
+| stream (pytest, 35 tests) | `argus-stream:test` | CRD-valid synthetic and holdout events, fraud patterns, fail-open + circuit breaker, invalid requests, actions, idempotent store and live accuracy, shadow scoring and its back-off, store migration, API control key on reads and writes, a rejected token held for REVIEW, publish-before-store with checkpoints and resume, a recreated stream never inheriting old checkpoints, Kinesis round trip (moto) |
+| deploy (pytest, 6 tests) | `python:3.12` | `ops.py`: Terraform settings carried to CI without secrets, the allow-list, the Fraud Model API check (token accepted / rejected / no model, against a local HTTP stub), empty CI variables, `.env` last-value-wins and PowerShell appends |
+
+CI (`.github/workflows/ci.yml`) runs all of them on every push and pull request, plus `terraform validate`, shellcheck
+of the GPU VM scripts and the compose file.
 
 ## 20. Troubleshooting
 
@@ -751,35 +845,56 @@ Invoke-RestMethod -Method Post http://localhost:8080/v1/fraud/score -Headers $h 
 | Platform says Docker is not reachable | Docker Desktop running? The compose file mounts `/var/run/docker.sock`, which Docker Desktop provides on Windows too |
 | `pip` downloads crawl or time out while building | build with a PyPI mirror: `$env:PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"; .\argus.ps1 build` (same pinned versions) |
 | Build hangs on "load metadata" from Docker Hub | `$env:DOCKER_BUILDKIT=0` for that build, or retry later |
+| Docker stops answering (HTTP 500, commands hang) while builds or tests run next to the serving stack | Docker's WSL VM gets half the PC's RAM by default (7.5 GB on 16 GB) and the full stack leaves ~1.3 GB of it. Run `.\argus.ps1 unserve` before building or testing, run one heavy job at a time, or give WSL more memory in `%UserProfile%\.wslconfig` (`[wsl2]` then `memory=10GB`, then `wsl --shutdown`). Restart Docker Desktop if it already hangs |
+| A page shows nothing after the UI was rebuilt | the open tab still has the old build: the page reloads itself once; if not, press Ctrl+Shift+R |
 | CUDA out of memory on 4 GB | lower `batch_size` / raise `grad_accum` for the stage, or `max_length`; make sure serving is stopped |
 | A run shows *interrupted* | its events stopped for 15 min without `run_end` (container killed / PC slept); open the run and press **Re-run stages** (same run name, pick the remaining stages) |
 | MLflow panel empty in the UI | open http://localhost:5000 directly; `docker compose logs mlflow` |
 | Scoring returns 503 "no model active" | activate a run: Scoring → Deployments, or `serve <run>` |
-| Port already in use | change the left side of `ports:` in `docker-compose.yml` |
+| Port already in use | set the matching `ARGUS_*_PORT` in `.env` (section 11a), then `.\argus.ps1 up` |
+| `could not select device driver "nvidia"` on a machine without an NVIDIA GPU | use `argus.ps1` (it adds `docker-compose.nogpu.yml`), or set `COMPOSE_FILE` as in section 11a |
 | C: drive still full after deleting images | Docker Desktop's virtual disk doesn't shrink by itself: Docker Desktop → Troubleshoot → Clean / Purge data |
 
 ## 21. Results so far
 
-These are the local runs on a 4 GB RTX 3050, from `training/outputs/comparison.md` (`.\argus.ps1 report`). They are
-demo-sized runs: 1 epoch or a few steps per stage, 135M–500M models, a random 5,000-row validation sample. They
-prove the ladder works end to end, **not** the CRD accuracy targets. Those need the A100 profile and the client's
-real data.
+Four local runs on a 4 GB RTX 3050, all 14 stages each, from `training/outputs/comparison.md` (`.\argus.ps1 report`):
+`smoke` (21.7 min), `argus_demo_hybrid` (48.4 min), `argus_demo_llm_scorer` (30.7 min, reuses the hybrid run) and
+`argus_local_demo` (47.3 min). They are demo-sized: 1 epoch or a few steps per stage, 135M–500M models, a random
+5,000-row validation sample. They prove the ladder works end to end, **not** the CRD accuracy targets. Those need the
+A100 profile and the client's real data.
+
+| Run | Gate measured | Branch taken | Scorer served | Explainer | Holdout acceptance |
+|---|---|---|---|---|---|
+| `argus_demo_hybrid` | HYBRID (−0.050) | HYBRID | XGBoost | AWQ LLM student | NO-GO (OBJ-01, 02, 03) |
+| `argus_demo_llm_scorer` | HYBRID (−0.050) | **LLM (forced)** | FP8 LLM student | AWQ LLM student | NO-GO (OBJ-01, 02, 03, 04, 10) |
+| `argus_local_demo` | HYBRID (−0.112) | HYBRID | XGBoost | AWQ LLM student | NO-GO (OBJ-01, 02, 03) |
+| `smoke` | HYBRID | LLM (forced) | FP8 LLM student | AWQ LLM student | NO-GO (tiny sizes by design) |
+
+**Scorers of `argus_demo_llm_scorer`, later half of validation, calibrated:**
 
 | Scorer | PR-AUC | ROC-AUC | Calibration (ECE) | Top 12,000/day: recall / precision |
 |---|---|---|---|---|
-| XGBoost (baseline, served by the HYBRID run) | 0.275 | 0.988 | isotonic 0.0024 | 4.8% / 14.3% |
-| LLM teacher scorer (bf16) | 0.423 | 0.988 | Platt 0.0018 | 19.1% / 57.1% |
-| LLM student scorer (bf16) | 0.329 | 0.988 | Platt 0.0016 | 4.8% / 14.3% |
-| LLM student scorer (FP8, served) | 0.315 | 0.988 | Platt 0.0019 | 4.8% / 14.3% |
+| XGBoost (early stopping, 295 trees) | 0.295 | 0.989 | Platt 0.0019 | 4.8% / 14.3% |
+| LLM teacher scorer (bf16) | 0.301 | 0.988 | Platt 0.0019 | 14.3% / 42.9% |
+| LLM student scorer (bf16) | 0.378 | 0.989 | Platt 0.0017 | 19.1% / 57.1% |
+| LLM student scorer (FP8, served) | 0.363 | 0.989 | isotonic 0.0014 | 14.3% / 42.9% |
 
-**The gate.**
+**The gate.** The pilot winner (h2o-danube3-500m, `fmt-v1`) reached 0.222 PR-AUC against XGBoost's 0.272 on the same
+rows, so the week-8 gate measured **HYBRID**. `demo_llm_scorer` forces the LLM branch anyway, so both branches can be
+compared side by side: after CPT, SFT and distillation the LLM students beat XGBoost by +0.07–0.08 PR-AUC on
+validation. That is the evidence a week-8 review would revisit.
 
-- **Pilot result.** The pilot winner (h2o-danube3-500m, `fmt-v1`) reached 0.174 validation PR-AUC after its short
-  pilot. That is below XGBoost, so the week-8 gate measured **HYBRID**.
-- **The forced comparison.** `demo_llm_scorer` forces the LLM branch anyway, so both branches can be compared side
-  by side.
-- **What the comparison shows.** After CPT and full SFT, the LLM teacher beats XGBoost by +0.15 PR-AUC. That is
-  exactly the kind of evidence the week-8 decision would revisit.
+**Holdout acceptance (stage 9, Jan–Feb 2026, never used for training or selection).**
+
+- **Every run is NO-GO, as it should be at this size.** At the policy cut-offs (REVIEW 0.60 / BLOCK 0.85) nothing is
+  flagged, because the calibrated probabilities of demo-sized models stay low. OBJ-01, 02 and 03 fail.
+- **The FP8 LLM student vs XGBoost on the holdout.** PR-AUC 0.266 vs 0.248. With the recommended cut-offs chosen on
+  validation (REVIEW 0.025), it reaches **85% recall** on the holdout, against XGBoost's 59% at its own recommended
+  cut-off. Applying such cut-offs is a Rules & policy change with two-person approval, never automatic.
+- **Latency.** The FP8 student takes p50 262 ms / p99 454 ms in-process on this card: the RTX 3050 (Ampere) has no
+  FP8 hardware and runs FP8 as weight-only. OBJ-10 is judged on the L4 serving fleet. End to end through the API on
+  this laptop: p50 520 ms, p99 743 ms at 1 request/s (`argus_api.loadtest`). Above about 1.7 requests/s the API
+  sheds load with 503 at the deadline instead of queueing.
 
 **Explainers.**
 
@@ -787,6 +902,10 @@ real data.
 - Answers aren't varied yet: 1–2 distinct answers on 17 gold cases. The demo-length training learned the majority
   answer. More SFT rows and steps (the A100 profile) are the fix.
 - The consistency guard falls back to the reason-code template whenever the text contradicts the scorer's codes.
+
+**The live path.** The stream scored 105 transactions through Kinesis → Fraud Model API → action with no fail-open.
+The HYBRID run shadowed the live LLM run on 42 of them, agreeing on every decision; the rest were skipped by design,
+because the shadow only takes a free scoring slot.
 
 ## 22. Local demo vs production
 
@@ -800,9 +919,10 @@ real data.
 | Auth | bearer tokens | mTLS + 15-min service JWT (NFR-07) |
 | Serving | one GPU, one scoring container, vLLM explainer | multi-AZ EKS, L4 / A10G node group (≤ 8 GPUs), autoscaling to 2,800 TPS |
 | Latency budgets | 5,000 / 3,000 ms (laptop) | 250 ms total, 220 ms explainer cutoff (`prod_a100.yaml`) |
-| Audit | `audit.jsonl` | 5-year immutable store (NFR-11) |
-| Registry | MLflow on SQLite | MLflow (or SageMaker registry), approved versions only, 7-day shadow (MLOPS-06) |
-| Infrastructure | Docker Compose | Terraform, CI/CD, dashboards and drift alerts (NFR-13, MLOPS-01..04) |
+| Audit | `audit.jsonl`; on AWS also the decisions stream → Firehose → versioned S3 (5-year expiry) | 5-year immutable store (NFR-11): S3 Object Lock in compliance mode |
+| Registry | MLflow on SQLite; holdout verdict tagged on each scorer version; shadow scoring on the stream | MLflow (or SageMaker registry), approved versions only, 7-day shadow (MLOPS-06) |
+| Infrastructure | Docker Compose locally; `deploy/`: GPU VM scripts, Terraform for AWS ap-south-1, GitHub Actions CI/CD, CloudWatch alarms | EKS for the API, drift alerts (PSI) on top (NFR-13, MLOPS-01..04) |
+| Event stream | Kinesis emulator locally; real Kinesis + Fargate on AWS (`deploy/`) | Kinesis feeding the Payment API path at 2,800 TPS (more shards) |
 
 **Moving to the A100.** Copy `argus_solution/` (including its `.env`) to the GPU VM, then:
 ```bash
@@ -840,13 +960,14 @@ docker compose run --rm trainer python -m argus_ft.pipeline --config configs/pro
 | 1–5 | Data access, PII redaction audit, EDA, corpus dedup and token counts, XGBoost baseline | D1 data report + corpus, D2 baseline | stages 0–1, data card / quality report |
 | 6–8 | Pilot: 3 base models × 2 formats; licence review; **week-8 go/no-go** | D3 pilot report | stage 2 + gate (`prod_a100` pilots the Part 3 models) |
 | 9–14 | CPT → SFT (scorer + explainer) → DPO → distillation → quantisation → calibration, thresholds, fairness | D4 checkpoints in the registry, D5 production model + reports | stages 3–8 + registry |
-| 10–15 | Fraud Model API, rules engine, admin; Redis feature store; Terraform, CI/CD, dashboards | D6 API + tests, D7 IaC + monitoring | D6 done locally; D7 not in this build |
-| 15–17 | Acceptance gates 1–4: offline accuracy on the holdout, 500-case explanation rating, red-team, 2-hour 2,800 TPS load test with an AZ failure | D8 acceptance results | evaluation code in stage 8; load and red-team tests to do |
+| 10–15 | Fraud Model API, rules engine, admin; Redis feature store; Terraform, CI/CD, dashboards | D6 API + tests, D7 IaC + monitoring | D6 done; D7 for the stream path (`deploy/`); EKS + Redis to do |
+| 15–17 | Acceptance gates 1–4: offline accuracy on the holdout, 500-case explanation rating, red-team, 2-hour 2,800 TPS load test with an AZ failure | D8 acceptance results | gate 1 = stage 9; load-test client (`argus_api.loadtest`); rating, red-team and the full-scale run to do |
 | 17–20 | 4-week shadow pilot, go-live recommendation; model card, data card, runbook, KT | D9 shadow report, D10 docs + KT | docs; shadow pilot to do |
 
 **Next steps on the real platform:**
 
-- run `prod_a100` on the client's data and check OBJ-01..06 on the Jan–Feb 2026 holdout;
+- run `prod_a100` on the client's data (`PROFILE=prod bash deploy/hyperstack/pipeline.sh` on an A100 VM); stage 9
+  checks OBJ-01..04 / 08..10 on the Jan–Feb 2026 holdout;
 - replace the feature snapshot with Redis;
 - put the API behind mTLS on EKS;
 - add PSI drift checks and the BLOCK-rate alert (MLOPS-02/04);
@@ -875,7 +996,7 @@ docker compose run --rm trainer python -m argus_ft.pipeline --config configs/pro
 argus_solution/
   README.md             this file
   argus.ps1             the command wrapper (sections 12-19)
-  docker-compose.yml    every service; profiles: default | serve | job
+  docker-compose.yml    every service; profiles: default | serve | stream | job
   .env.example          template for .env (secrets; .env itself is git-ignored)
   docs/README.md        links to the client documents and write-ups in the argus repo
   training/             argus_ft (the ladder, stages/, events, data, supabase sync) + configs/  -> image argus-training
@@ -883,6 +1004,9 @@ argus_solution/
   scoring_api/          argus_api (CRD 10 / LLD 2-6) + tests/  -> image argus-scoring
   platform/             FastAPI control plane: app/core, app/infra, app/features/<area> + tests/  -> image argus-platform
   frontend/             React 19 + Vite + TypeScript: src/app (shell, registry), src/shared, src/features/<page>
+  stream/               argus_stream: Kinesis producer + scorer (calls the Fraud Model API) + /live API + tests  -> image argus-stream
+  deploy/               README.md (runbook), hyperstack/ (GPU VM scripts), terraform/ (AWS stack + bootstrap), ops.py
+  .github/workflows/    ci.yml (every suite), deploy.yml (main -> AWS via OIDC), destroy.yml
 
 outside this repo, in the parent folder 01_argus/ (the separate `argus` repo):
   client_docs/          client documents, mounted read-only into the platform (Docs page)

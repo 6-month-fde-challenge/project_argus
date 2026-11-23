@@ -95,7 +95,8 @@ class RunRepository:
         return out
 
     def file_text(self, run: str, rel: str, max_bytes: int = 2_000_000) -> str:
-        f = (self.dir(run) / rel).resolve()
-        if not str(f).startswith(str(self.dir(run))) or not f.is_file():
+        base = self.dir(run)
+        f = (base / rel).resolve()
+        if not f.is_relative_to(base) or not f.is_file():  # a prefix check would let run "a" read "a2/..."
             raise NotFound(f"file '{rel}' not found in run '{run}'")
         return f.read_bytes()[:max_bytes].decode("utf-8", errors="replace")

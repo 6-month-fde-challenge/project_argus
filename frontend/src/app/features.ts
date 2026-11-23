@@ -10,9 +10,10 @@ import { registryFeature } from "@/features/registry";
 import { rulesFeature } from "@/features/rules";
 import { runsFeature } from "@/features/runs";
 import { scoringFeature } from "@/features/scoring";
+import { streamFeature } from "@/features/stream";
 import { systemFeature } from "@/features/system";
 
 export const FEATURES: FeatureDef[] = [
   overviewFeature, pipelineFeature, launchFeature, runsFeature, compareFeature,
-  registryFeature, scoringFeature, rulesFeature, systemFeature, dataFeature, docsFeature,
+  registryFeature, scoringFeature, streamFeature, rulesFeature, systemFeature, dataFeature, docsFeature,
 ];

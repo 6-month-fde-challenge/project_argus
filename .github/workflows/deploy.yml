@@ -1,0 +1,59 @@
+# Push to main -> every test -> build + push the stream image to ECR -> terraform apply -> ECS rolls out -> stable.
+# One-time setup on your PC: `python deploy/ops.py up` creates the OIDC deploy role and sets the repository variables
+# (AWS_ROLE_ARN, AWS_REGION, PROJECT, ENVIRONMENT, SCORING_HOST, ALLOWED_CIDRS, TF_VARS) and the secret SCORING_TOKEN.
+# Changed a TF_VAR_* in .env later? Re-run `python deploy/ops.py bootstrap` so CI deploys with it too.
+# No AWS keys are stored in GitHub. Until `up` has run, the deploy job is skipped (tests still run).
+name: deploy
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ vars.ENVIRONMENT || 'prod' }} # one Terraform run at a time
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    if: vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+      PROJECT: ${{ vars.PROJECT || 'argus' }}
+      ENVIRONMENT: ${{ vars.ENVIRONMENT || 'prod' }}
+      GITHUB_REPO: ${{ github.repository }}
+      TF_VAR_scoring_host: ${{ vars.SCORING_HOST }}
+      TF_VAR_scoring_token: ${{ secrets.SCORING_TOKEN }}
+      TF_VAR_allowed_cidrs: ${{ vars.ALLOWED_CIDRS }}
+      TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+      TF_VARS: ${{ vars.TF_VARS }} # every other TF_VAR_* of the machine that ran `ops.py up` (JSON)
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }} # optional: seeds the holdout into S3 once
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.0"
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Deploy
+        run: python deploy/ops.py deploy --tag "${GITHUB_SHA::10}"
+      - name: Status
+        if: always()
+        run: python deploy/ops.py status

@@ -90,6 +90,16 @@ def _trim_history(tokenizer, prompt: str, max_tokens: int) -> str:
 
 # ---------------------------------------------------------------- row selection
 
+def label_mature(row: dict) -> bool:
+    """Was the row's label already known when the next split starts (`eligible_at_next_split_start`)? Labels mature
+    60 days after the transaction, so a strict backtest must not train on the others. Rows without the flag count."""
+    return bool(row.get("eligible_at_next_split_start", True))
+
+
+def mature_labels_only(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if label_mature(r)]
+
+
 def downsample_negatives(rows: list[dict], neg_per_pos: int, seed: int) -> list[dict]:
     """Keep every fraud row and neg_per_pos genuine rows per fraud (FR-ML-04); 0 keeps everything."""
     if neg_per_pos <= 0:

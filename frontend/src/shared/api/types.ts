@@ -12,7 +12,14 @@ export interface Job {
   container_id: string | null;
 }
 
-export interface Gate { decision: string; mode?: string; branch?: string; uplift: number; llm_pr_auc: number; xgboost_pr_auc: number }
+export interface Gate {
+  decision: string;          // what the week-8 gate measured
+  branch?: string;           // what the run actually did (LLM when its LLM scorer stage trained)
+  mode?: string;             // the run's own gate.mode: auto, or hybrid / llm = forced (demo)
+  forced?: boolean;          // not a measured run (same rule as acceptance / registry / scoring API): a demo
+  forced_reason?: string | null;
+  uplift: number; llm_pr_auc: number; xgboost_pr_auc: number;
+}
 
 export interface RunSummary {
   name: string; status: RunStatus; profile: string | null; reused_from: string | null; gpu: string | null;
@@ -47,7 +54,7 @@ export interface ProfileDetail extends ProfileSummary { yaml: string; resolved: 
 
 export interface ServicesStatus {
   platform: string; docker: string; containers: Record<string, string>; scoring: string; explainer: string;
-  mlflow: string; mlflow_url: string; gpu_jobs: string[];
+  mlflow: string; mlflow_url: string; gpu_jobs: string[]; stream?: string;
 }
 export interface GpuSnapshot {
   available: boolean;

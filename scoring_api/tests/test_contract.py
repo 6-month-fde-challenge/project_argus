@@ -111,11 +111,36 @@ def test_mcc_override_applies_only_to_that_mcc(rules):
     ({"medium": 0.6, "review": 0.3, "block": 0.85}, "alice", "bob"),       # not increasing
     ({"medium": 0.0, "review": 0.3, "block": 0.85}, "alice", "bob"),       # lower bound
     ({"medium": 0.3, "review": 0.6, "block": 1.0}, "alice", "bob"),        # upper bound
+    ({"medium": 0.3, "review": 0.6, "block": 0.85}, "Alice ", " alice"),   # same person, other spelling
+    ({"medium": 0.3, "review": 0.6, "block": 0.85}, "alice", "  "),        # nobody approved
 ])
 def test_invalid_threshold_changes_are_refused(rules, t, req, appr):
     with pytest.raises(ValueError):
         rules.set_thresholds(t, None, req, appr, "x")
     assert rules.versions["threshold_version"] == 1
+
+
+def test_unknown_mcc_and_missing_reason_are_refused(rules):
+    ok = {"medium": 0.3, "review": 0.6, "block": 0.85}
+    with pytest.raises(ValueError):
+        rules.set_thresholds(ok, "gamng", "alice", "bob", "typo in the category")
+    with pytest.raises(ValueError):
+        rules.set_thresholds(ok, None, "alice", "bob", "   ")
+    assert rules.versions["threshold_version"] == 1
+
+
+def test_a_failed_save_changes_nothing(rules, monkeypatch):
+    before = json.loads(json.dumps(rules.cfg))
+
+    def disk_full(*_a, **_k):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr("argus_api.rules.shutil.move", disk_full)
+    with pytest.raises(OSError):
+        rules.set_thresholds({"medium": 0.1, "review": 0.2, "block": 0.4}, None, "alice", "bob", "x")
+    with pytest.raises(OSError):
+        rules.update_list("blocked_devices", "DEV_X", True, "ops", "x")
+    assert rules.cfg == before and rules.hard_match("DEV_X") is None  # served config == the config on disk
 
 
 def test_lists_are_versioned_and_logged(rules, tmp_path):
@@ -206,6 +231,24 @@ def test_activate_warms_once_and_switches_instantly(deployments):
     assert FakeScorer.loads == 2 and len(warmed) == 2 and d.scorer.run == "hybrid"
 
 
+def test_a_switch_never_leaves_the_service_without_a_model(tmp_path, monkeypatch):
+    monkeypatch.setattr(dep, "Scorer", FakeScorer)
+    for name in ("a", "b", "c"):
+        for f in ("pilot/selected.json", "xgboost/model.json", "calibration/xgboost.json"):
+            (tmp_path / name / f).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / name / f).write_text("{}")
+    seen = []  # what a request would see while the next model is loading
+    d = dep.Deployments(tmp_path, 384, lambda s: seen.append((d.active, len(d._loaded))), capacity=2)
+    for run in ("a", "b", "c"):
+        d.activate(run)
+    assert [s[0] for s in seen[1:]] == ["a", "b"]  # the previous model kept serving during every load
+    assert all(n < 2 for _, n in seen)              # room was made BEFORE loading: never 3 models on the GPU
+    single = dep.Deployments(tmp_path, 384, lambda s: seen.append(single.active), capacity=1)
+    single.activate("a")
+    single.activate("b")
+    assert single.active == "b" and list(single._loaded) == ["b"] and seen[-1] == "a"
+
+
 def test_lru_eviction(deployments):
     d, _ = deployments
     for run in ("hybrid", "llm", "third"):                                  # third evicts hybrid
@@ -232,3 +275,149 @@ def test_activate_rejects_non_deployable(deployments, run):
 def test_explanation_must_share_a_reason_code_with_the_scorer(llm, scorer, ok):
     from argus_api.explainer import consistent
     assert consistent(llm, scorer) is ok
+
+
+def test_shadow_never_evicts_or_replaces_the_active_scorer(deployments):
+    d, _ = deployments
+    d.activate("hybrid")
+    for run in ("llm", "third", "llm"):               # shadow runs churn through the second cache slot
+        assert d.set_shadow(run) is not None
+        assert d.active == "hybrid" and d.scorer is not None and d.shadow_run == run
+    assert "hybrid" in d._loaded and len(d._loaded) == 2
+    with pytest.raises(KeyError):
+        d.set_shadow("half_done")
+    with pytest.raises(ValueError):
+        d.set_shadow("hybrid")                         # the active run cannot shadow itself
+
+
+def test_a_production_profile_never_activates_a_forced_demo_run(tmp_path, monkeypatch):
+    from argus_api.runs import ForcedRunRefused, forced
+    monkeypatch.setattr(dep, "Scorer", FakeScorer)
+    # (gate.mode in the run's config, gate/decision.json or None, serves the LLM scorer)
+    runs = {"measured": ("auto", {"decision": "HYBRID", "mode": "auto"}, False),
+            "measured_llm": ("auto", {"decision": "LLM", "mode": "auto"}, True),
+            "demo": ("llm", {"decision": "HYBRID", "mode": "llm"}, True),
+            "legacy": (None, None, False),                                       # no decision file: cannot prove it
+            "reused_forced": ("auto", {"decision": "HYBRID", "mode": "hybrid"}, False),
+            "stale_llm": ("auto", {"decision": "HYBRID", "mode": "auto"}, True)}  # serves LLM, gate measured HYBRID
+    for name, (mode, decision, llm) in runs.items():
+        make_run(tmp_path, name, "llm" if llm else "xgboost")
+        d = tmp_path / name
+        (d / "report.json").write_text(json.dumps({"config": {"gate": {"mode": mode}} if mode else {}}))
+        if decision:
+            (d / "gate").mkdir()
+            (d / "gate" / "decision.json").write_text(json.dumps(decision))
+    assert {name: forced(tmp_path / name) for name in runs} == {
+        "measured": False, "measured_llm": False, "demo": True, "legacy": True, "reused_forced": True, "stale_llm": True}
+    assert forced(tmp_path / "no_such_run")  # cannot prove it is a measured run: treated as forced
+    prod = dep.Deployments(tmp_path, 384, lambda s: None, allow_forced=False)
+    prod.activate("measured")
+    with pytest.raises(ForcedRunRefused):
+        prod.activate("demo")
+    assert prod.active == "measured"                       # the live run is untouched
+    assert prod.set_shadow("demo") is not None              # a demo run may still be compared in shadow
+    assert {m["run"]: m["forced"] for m in prod.available()} == {name: forced(tmp_path / name) for name in runs}
+    assert dep.Deployments(tmp_path, 384, lambda s: None, allow_forced=True).activate("demo")  # the local demo may
+
+
+def test_shadow_scoring_only_uses_the_designated_run_and_never_loads(deployments):
+    d, warmed = deployments
+    d.activate("hybrid")
+    assert d.shadow_scorer("llm") is None and len(warmed) == 1  # not designated: nothing loaded
+    d.set_shadow("llm")
+    assert d.shadow_scorer("llm") is not None and d.shadow_scorer("third") is None
+    d.activate("third")             # needs a slot: the shadow is evicted first, the live scorer stays until the switch
+    assert d.active == "third" and d.shadow_run is None and d.shadow_scorer("llm") is None
+    assert set(d._loaded) == {"hybrid", "third"}
+    d.set_shadow("hybrid")
+    d.activate("hybrid")            # promoting the shadow ends shadowing
+    assert d.active == "hybrid" and d.shadow_run is None
+    d.set_shadow(None)
+    assert [m["shadow"] for m in d.available()] == [False, False, False]
+
+
+# ------------------------------------------------------------------ auth
+def test_tokens_from_the_environment_override_the_profile(monkeypatch):
+    from argus_api.auth import apply_token_env
+    api = {"token": "demo-service-token", "admin_token": "demo-admin-token"}
+    monkeypatch.setenv("ARGUS_SCORING_TOKEN", "s3cret-service")
+    monkeypatch.delenv("ARGUS_SCORING_ADMIN_TOKEN", raising=False)
+    apply_token_env(api)
+    assert api == {"token": "s3cret-service", "admin_token": "demo-admin-token"}
+
+
+def test_admission_sheds_what_cannot_start_before_its_deadline():
+    import asyncio
+    from argus_api.admission import Admission
+
+    async def scenario():
+        a = Admission(2)
+        assert await a.acquire(0.1) and await a.acquire(0.1)        # both slots taken
+        assert not await a.acquire(0.05)                            # no slot within the budget: shed, not queued
+        assert not await a.acquire(0) and not await a.try_acquire()  # budget spent / shadow never waits
+        waiter = asyncio.create_task(a.acquire(1.0))
+        await asyncio.sleep(0.01)
+        a.release()                                                 # a slot frees up inside the budget
+        assert await waiter
+        a.release(), a.release()
+        assert await a.try_acquire()                                # a free slot: shadow may use it
+        return a.stats()
+
+    assert asyncio.run(scenario()) == {"slots": 2, "busy": 1, "admitted": 4, "shed": 3}
+
+
+def test_explainer_never_queues_and_trips_on_repeated_timeouts():
+    import asyncio
+
+    import httpx
+    from argus_api import explainer as ex
+
+    class Guard:
+        def template(self, codes):
+            return {"explanation": "template"}
+
+    def slow(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    e = object.__new__(ex.Explainer)  # no gold data needed for this path
+    e.url, e.max_tokens, e.guard, e._open_until = "http://explainer:8000", 8, Guard(), 0.0
+    e.max_in_flight, e.in_flight, e.timeouts = 1, 0, 0
+    e.client = httpx.AsyncClient(transport=httpx.MockTransport(slow))
+
+    async def scenario():
+        e.in_flight = 1                                   # saturated: the template answers at once, nothing queued
+        assert await e.explain("p", [], 1.0) == ("template", "TEMPLATE", 0)
+        e.in_flight = 0
+        sources = [(await e.explain("p", [], 1.0))[1] for _ in range(ex.TIMEOUTS_TO_TRIP)]
+        assert sources == ["EXPLANATION_ASYNC"] * ex.TIMEOUTS_TO_TRIP and e.in_flight == 0
+        assert (await e.explain("p", [], 1.0))[1] == "TEMPLATE"  # breaker opened by the repeated timeouts
+
+    asyncio.run(scenario())
+
+
+def test_every_protected_path_needs_its_token_before_validation():
+    from argus_api.auth import authorised
+    api = {"token": "svc", "admin_token": "adm"}
+    assert authorised("/v1/health", None, api) and authorised("/docs", None, api)          # open
+    for path in ("/v1/fraud/score", "/v1/fraud/shadow/run_b"):
+        assert authorised(path, "Bearer svc", api)
+        assert not authorised(path, None, api) and not authorised(path, "Bearer adm", api)   # admin is not service
+    for path in ("/admin/v1/thresholds", "/admin/v1/models/run_b/shadow"):
+        assert authorised(path, "Bearer adm", api) and not authorised(path, "Bearer svc", api)
+
+
+def test_bearer_check():
+    from argus_api.auth import bearer_ok
+    assert bearer_ok("Bearer abc", "abc")
+    for bad in (None, "", "Bearer abd", "abc", "Bearer abc "):
+        assert not bearer_ok(bad, "abc")
+
+
+def test_a_run_is_served_with_the_prompt_cap_it_was_trained_with(tmp_path):
+    from argus_api.runs import run_max_length
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "report.json").write_text(json.dumps({"config": {"max_length": 1024}}))
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "report.json").write_text("not json")
+    assert run_max_length(tmp_path / "a", 384) == 1024
+    assert run_max_length(tmp_path / "b", 384) == 384 and run_max_length(tmp_path / "missing", 384) == 384

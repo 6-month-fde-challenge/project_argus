@@ -4,10 +4,14 @@ import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
 
 // Dev server proxies /api to the platform (docker: http://localhost:8090); production is served by nginx.
+// ARGUS_UI_PORT / ARGUS_API_PORT follow the same host-port settings as docker-compose.yml.
+const uiPort = Number(process.env.ARGUS_UI_PORT ?? 3000);
+const apiPort = Number(process.env.ARGUS_API_PORT ?? 8090);
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
-  server: { port: 3000, proxy: { "/api": { target: "http://localhost:8090", changeOrigin: true } } },
+  server: { port: uiPort, proxy: { "/api": { target: `http://localhost:${apiPort}`, changeOrigin: true } } },
   build: {
     chunkSizeWarningLimit: 1500,
     rollupOptions: {

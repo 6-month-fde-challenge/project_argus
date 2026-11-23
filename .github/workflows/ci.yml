@@ -1,0 +1,76 @@
+# Every test suite + infrastructure checks, on every pull request and push. deploy.yml calls it before deploying.
+# No GPU here: the ML suites run on CPU torch; the ladder itself is exercised by the smoke profile on a GPU host.
+name: ci
+on:
+  pull_request:
+  push:
+    branches-ignore: [main] # main is tested inside deploy.yml
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [platform, stream, ml]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: platform API (routes, jobs, events, SSE, upstreams)
+        if: matrix.suite == 'platform'
+        run: |
+          pip install -r platform/requirements-dev.txt
+          cd platform && python -m pytest -q
+      - name: stream service (generator, fail-open, store, API, Kinesis via moto)
+        if: matrix.suite == 'stream'
+        run: |
+          pip install -r stream/requirements-dev.txt
+          cd stream && python -m pytest -q
+      - name: training logic + Fraud Model API contract (CPU)
+        if: matrix.suite == 'ml'
+        run: |
+          pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu   # same version, CPU build
+          pip install -r training/requirements.txt pytest==9.2.0                      # exactly the training image
+          cd training && python -m pytest -q
+          cd ../scoring_api && PYTHONPATH=../training:. python -m pytest -q -p no:cacheprovider tests
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: frontend
+      - run: npm run build && npm test # tsc -b + vite build, then vitest
+        working-directory: frontend
+
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.0"
+      - run: terraform fmt -check -recursive deploy/terraform
+      - run: terraform -chdir=deploy/terraform init -backend=false -input=false && terraform -chdir=deploy/terraform validate
+      - run: terraform -chdir=deploy/terraform/bootstrap init -input=false && terraform -chdir=deploy/terraform/bootstrap validate
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: deploy/ops.py logic (settings carried to CI, allow-list, Fraud Model API check)
+        run: pip install pytest==9.2.0 && python -m pytest -q -p no:cacheprovider deploy/tests
+      - name: shellcheck (GPU VM scripts)
+        run: shellcheck -x -S warning deploy/hyperstack/*.sh
+      - name: compose file
+        run: touch .env && docker compose --profile serve --profile stream --profile job config --quiet

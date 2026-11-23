@@ -8,6 +8,8 @@ import argparse
 import json
 from pathlib import Path
 
+from .branch import check
+
 SCORER_NAMES = {"xgboost": "XGBoost", "teacher": "LLM teacher (bf16)", "scorer_student": "LLM student (bf16)",
                 "scorer_student_fp8": "LLM student (FP8)"}
 EXPLAINERS = [("sft_explainer", "Teacher after SFT"), ("dpo", "Teacher after DPO"),
@@ -50,13 +52,40 @@ def explainer_rows(stages: dict) -> list[str]:
     return rows
 
 
+def acceptance_rows(stages: dict) -> list[str]:
+    """Stage 9: the holdout checklist for the served scorer."""
+    acc = stages.get("acceptance")
+    if not acc:
+        return []
+    ok = {True: "pass", False: "**FAIL**", None: "n/a"}
+    why = acc.get("forced_reason") or f"gate.mode={acc.get('gate_mode')}: forced branch"
+    demo = f" (not a measured run - {why}: a demo, never promotable)" if acc.get("forced_branch") else ""
+    out = [f"## Acceptance on the holdout: **{acc['verdict']}**{demo}", "",
+           f"Served scorer `{acc['served']}` on {acc['rows']:,} holdout rows ({acc['fraud']} fraud), frozen stage-8 "
+           "calibrator, policy thresholds REVIEW 0.60 / BLOCK 0.85.", "",
+           "| Objective | Measure | Value | Target | Result |", "|---|---|---|---|---|"]
+    for c in acc["objectives"]:
+        value = c["value"] if c["value"] is None or isinstance(c["value"], int) else f"{c['value']:.4g}"
+        out.append(f"| {c['id']} | {c['name']} | {'–' if value is None else value} | {c['target']} | {ok[c['pass']]} |")
+    rec = acc["scorers"][acc["served"]]["recommended"]
+    if rec.get("review_threshold") is not None:
+        out += ["", f"Recommended thresholds (chosen on the later half of validation for the recall / precision targets): "
+                    f"REVIEW {rec['review_threshold']:.4f}, BLOCK {rec['block_threshold']:.4f}. On the holdout they give "
+                    f"recall {_pct(rec['at_review']['recall'])} at REVIEW and precision {_pct(rec['at_block']['precision'])} "
+                    "at BLOCK. Apply them only through Rules & policy (two-person approval)."]
+    lat = acc["latency"]
+    out += ["", f"Latency of `{lat['scorer']}` ({lat['where']}): p50 {lat['p50_ms']} ms, p99 {lat['p99_ms']} ms.", ""]
+    return out
+
+
 def run_report(run_dir: Path) -> str:
     report = json.loads((run_dir / "report.json").read_text())
     st = report["stages"]
     gate, pilot, q = st.get("gate", {}), st.get("pilot", {}), st.get("quantize", {})
     scorer = "LLM (FP8 scorer student)" if "scorer_fp8" in q else "XGBoost (HYBRID path)"
-    if gate.get("mode", "auto") != "auto":
-        scorer += f" (gate.mode={gate['mode']}: branch forced; measured decision {gate.get('decision')})"
+    branch = check(run_dir)
+    if branch["forced"]:
+        scorer += f" (demo, never promotable: {branch['reason']}; measured decision {gate.get('decision', '–')})"
     out = [f"# Run `{run_dir.name}`", "",
            f"- Profile: `{report['profile']}`" + (f", reusing `{report['reused_from']}`" if report.get("reused_from") else ""),
            f"- GPU: {report['gpu']}",
@@ -75,7 +104,7 @@ def run_report(run_dir: Path) -> str:
             "## Explainers (held-out gold cases)", "",
             "| Explainer | Valid JSON | Valid schema | Reason-code F1 | Accepted by guard | Distinct answers (gold) |",
             "|---|---|---|---|---|---|",
-            *explainer_rows(st), ""]
+            *explainer_rows(st), "", *acceptance_rows(st)]
     if q:
         out += ["## Quantisation", ""]
         if "scorer_fp8" in q:
@@ -92,13 +121,24 @@ def run_report(run_dir: Path) -> str:
 
 
 def comparison(run_dirs: list[Path]) -> str:
-    out = ["# Run comparison", "", "| Run | Gate (measured) | Scorer | Pilot winner |", "|---|---|---|---|"]
+    out = ["# Run comparison", "",
+           "Gate (measured) is what the week-8 gate measured; Branch is the one the run took (`gate.mode` can force it). "
+           "(demo): not a measured run (forced gate, missing / forced gate decision, or served != measured): never promotable.",
+           "", "| Run | Gate (measured) | Branch | Scorer | Explainer | Pilot winner | Holdout acceptance |",
+           "|---|---|---|---|---|---|---|"]
     for d in run_dirs:
         st = json.loads((d / "report.json").read_text())["stages"]
         sel = st.get("pilot", {}).get("selected", {})
-        out.append(f"| `{d.name}` | {st.get('gate', {}).get('decision', '–')} | "
-                   f"{'LLM (FP8 student)' if 'scorer_fp8' in st.get('quantize', {}) else 'XGBoost'} | "
-                   f"{sel.get('teacher', '–')} / {sel.get('format', '–')} |")
+        acc = st.get("acceptance", {})
+        verdict = acc.get("verdict", "–") + (f" ({', '.join(acc['failing'])})" if acc.get("failing") else "")
+        gate = st.get("gate", {})
+        ran_llm = st.get("sft_scorer", {}).get("status") == "ok" and not st.get("sft_scorer", {}).get("reused_from")
+        gate = {**gate, "branch": "LLM" if ran_llm else gate.get("branch", gate.get("decision", "–"))}
+        explainer = "LLM (AWQ student, vLLM)" if "explainer_awq" in st.get("quantize", {}) else "–"
+        demo = " (demo)" if check(d)["forced"] else ""
+        out.append(f"| `{d.name}` | {gate.get('decision', '–')} | {gate.get('branch', gate.get('decision', '–'))}{demo} | "
+                   f"{'LLM (FP8 student)' if 'scorer_fp8' in st.get('quantize', {}) else 'XGBoost'} | {explainer} | "
+                   f"{sel.get('teacher', '–')} / {sel.get('format', '–')} | {verdict} |")
     for d in run_dirs:
         st = json.loads((d / "report.json").read_text())["stages"]
         out += ["", f"## `{d.name}` - scorers", "",
@@ -106,8 +146,9 @@ def comparison(run_dirs: list[Path]) -> str:
                 "Policy REVIEW >=0.60 | Policy BLOCK >=0.85 |", "|---|---|---|---|---|---|---|", *scorer_rows(st),
                 "", f"## `{d.name}` - explainers", "",
                 "| Explainer | Valid JSON | Valid schema | Reason-code F1 | Accepted by guard | Distinct answers (gold) |",
-            "|---|---|---|---|---|---|",
-                *explainer_rows(st)]
+                "|---|---|---|---|---|---|",
+                *explainer_rows(st), "", *(line.replace("## Acceptance", f"## `{d.name}` - acceptance")
+                                           for line in acceptance_rows(st))]
     return "\n".join(out) + "\n"
 
 

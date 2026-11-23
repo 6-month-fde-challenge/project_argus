@@ -80,6 +80,21 @@ class MlflowClient(_Client):
         return body.get("runs", [])
 
 
+class StreamClient(_Client):
+    """The stream service (Kinesis -> Fraud Model API -> actions): analytics reads, traffic control with the key."""
+    name = "stream service"
+
+    def __init__(self, s: Settings):
+        super().__init__(s.stream_url, timeout=15.0)
+        self.control = {"X-Control-Key": s.stream_control_key}
+
+    async def get(self, path: str, **params):  # reads carry transaction data: the key is required for them too
+        return await self.request("GET", f"/live/api/{path}", params=params or None, headers=self.control)
+
+    async def control_call(self, path: str, body: dict):
+        return await self.request("POST", f"/live/api/{path}", json=body, headers=self.control)
+
+
 class ExplainerClient(_Client):
     name = "vLLM explainer"
 

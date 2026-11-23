@@ -1,7 +1,7 @@
 /** The ARGUS-LM model ladder (Part 3, Figure 4): one place for every stage's label, figure number and story. */
 export type StageId =
   | "data_checks" | "xgboost" | "pilot" | "gate" | "cpt" | "sft_scorer" | "sft_explainer" | "dpo"
-  | "distill_scorer" | "distill_explainer" | "quantize" | "calibrate" | "registry";
+  | "distill_scorer" | "distill_explainer" | "quantize" | "calibrate" | "acceptance" | "registry";
 
 export interface StageMeta {
   id: StageId;
@@ -51,6 +51,9 @@ export const STAGES: StageMeta[] = [
   { id: "calibrate", step: "8", label: "Calibrate + thresholds", short: "Calibrate", group: "ship", branch: "both",
     what: "Platt vs isotonic (lower ECE wins); PR-AUC, recall at review capacity, threshold sweep, fairness by age band and region.",
     doc: "FR-ML-06/11/12, TR-ML-02..05" },
+  { id: "acceptance", step: "9", label: "Acceptance · holdout", short: "Acceptance", group: "ship", branch: "both",
+    what: "The served scorer on the untouched Jan–Feb 2026 holdout with its frozen calibrator: OBJ checklist, recommended REVIEW / BLOCK thresholds, PR / ROC curves, p99 latency, GO / NO-GO.",
+    doc: "CRD 4 OBJ-01..10, CRD 15 acceptance gate 1" },
   { id: "registry", step: "R", label: "Registry · MLflow", short: "Registry", group: "ship", branch: "both",
     what: "Config, data snapshot, every metric and the serving models logged and registered (argus-scorer, argus-explainer).",
     doc: "FR-ML-08, TR-DEP-03" },

@@ -1,6 +1,8 @@
 """HTTP contract of the platform API: every router, its happy path and its edge cases."""
 from __future__ import annotations
 
+import pytest
+
 
 def test_health_and_openapi(client):
     assert client.get("/api/v1/health").json() == {"status": "ok", "service": "argus-platform"}
@@ -142,3 +144,12 @@ def test_a_new_job_is_a_visible_queued_run_before_its_container_starts(client):
     d = client.get("/api/v1/runs/fresh_run").json()
     assert d["status"] == "queued" and [r["name"] for r in d["ladder"]] == ["xgboost", "pilot"]
     assert d["profile"] == "configs/smoke.yaml" and all(r["status"] == "pending" for r in d["ladder"])
+
+
+def test_a_run_cannot_read_a_sibling_run_with_the_same_prefix(container):
+    from app.core.errors import NotFound
+    outputs = container.runs.root
+    (outputs / "demo_run2").mkdir()
+    (outputs / "demo_run2" / "secret.txt").write_text("other run")
+    with pytest.raises(NotFound):
+        container.runs.file_text("demo_run", "../demo_run2/secret.txt")

@@ -3,12 +3,13 @@
     0 Data checks --> 1 XGBoost --> 2 Pilot (3 models x 2 formats) --> Week-8 gate --no--> Hybrid: XGBoost scores
                                                                            | yes
     3 CPT --> 4 SFT LoRA (4a fraud + reason heads, 4b explainer) --> 5 DPO
-    6 Distil (6a scorer, 6b explainer) --> 7 Quantise (FP8, AWQ 4-bit) --> 8 Calibrate --> Registry (MLflow)
+    6 Distil (6a scorer, 6b explainer) --> 7 Quantise (FP8, AWQ 4-bit) --> 8 Calibrate --> 9 Acceptance (holdout)
+    --> Registry (MLflow)
 
 On "no", the gate skips the LLM scorer stages (4a, 6a); the explainer branch still runs ("the LLM explains").
 """
-from . import (calibrate, cpt, data_checks, distill_explainer, distill_scorer, dpo, gate, pilot, quantize, registry,
-               sft_explainer, sft_scorer, xgboost_baseline)
+from . import (acceptance, calibrate, cpt, data_checks, distill_explainer, distill_scorer, dpo, gate, pilot, quantize,
+               registry, sft_explainer, sft_scorer, xgboost_baseline)
 
 LADDER = {
     "data_checks":       data_checks.run,        # 0  leakage tests (fail the run) + data-quality report
@@ -23,5 +24,6 @@ LADDER = {
     "distill_explainer": distill_explainer.run,  # 6b DPO explainer -> small explainer student
     "quantize":          quantize.run,           # 7  FP8 scorer student, AWQ 4-bit explainer student
     "calibrate":         calibrate.run,          # 8  Platt / isotonic + thresholds + policy + fairness
+    "acceptance":        acceptance.run,         # 9  holdout: frozen calibrators, OBJ checklist, GO / NO-GO
     "registry":          registry.run,           #    data snapshot, config, metrics, models -> MLflow
 }

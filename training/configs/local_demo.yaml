@@ -7,3 +7,5 @@ api:                              # a 4 GB laptop GPU scores in ~0.3 s: producti
   max_deadline_ms: 6000
   explain_cutoff_ms: 3000
   time_window_minutes: 0          # 0 = off: the demo replays historical 2025 transactions
+  max_concurrent_scoring: 2       # one small laptop GPU: more parallel forward passes only queue on the card
+  allow_forced_runs: true         # the demo serves demo_hybrid / demo_llm_scorer, whose branch is forced on purpose

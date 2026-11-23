@@ -5,6 +5,7 @@ Config lives in a JSON file seeded from the dataset's rules_config.json; it is r
 """
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import threading
@@ -12,8 +13,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .schemas import MCC_GROUPS  # CRD 10.2 merchant categories
+
 RISK_LEVELS = [("LOW", "ALLOW"), ("MEDIUM", "ALLOW"), ("HIGH", "REVIEW"), ("CRITICAL", "BLOCK")]
 LISTS = {"blocked_devices", "allowlisted_customers"}
+
+
+def person(name: str) -> str:
+    """One spelling per person for the two-person rule: trimmed, inner spaces collapsed, case-folded."""
+    return " ".join((name or "").split()).casefold()
 
 
 @dataclass
@@ -49,11 +57,12 @@ class RulesEngine:
         with self.changelog.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"at": datetime.now(timezone.utc).isoformat(), **change}) + "\n")
 
-    def _save(self, change: dict) -> None:
+    def _commit(self, new_cfg: dict, change: dict) -> None:
+        """Write the new config to disk first (atomic rename), then serve it: a failed write changes nothing."""
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.cfg, indent=2))
+        tmp.write_text(json.dumps(new_cfg, indent=2))
         shutil.move(tmp, self.path)
-        self._mtime = self.path.stat().st_mtime
+        self.cfg, self._mtime = new_cfg, self.path.stat().st_mtime
         self.log_change(change)
 
     @property
@@ -85,19 +94,29 @@ class RulesEngine:
     # ------------------------------------------------------------ admin (LLD 4.4)
 
     def set_thresholds(self, thresholds: dict, mcc: str | None, requested_by: str, approved_by: str, reason: str) -> dict:
-        if requested_by == approved_by:
+        # Two-person rule on normalised names ("Alice " and "alice" are one person). With a shared admin token this is
+        # an audit control, not authentication: production puts each name behind SSO + MFA (NFR-09).
+        requested, approved = person(requested_by), person(approved_by)
+        if not requested or not approved:
+            raise ValueError("requested_by and approved_by are required")
+        if requested == approved:
             raise ValueError("two-person approval: approved_by must differ from requested_by")
+        if not reason.strip():
+            raise ValueError("a reason is required for every threshold change")
         if not 0 < thresholds["medium"] < thresholds["review"] < thresholds["block"] < 1:
             raise ValueError("thresholds must satisfy 0 < medium < review < block < 1")
+        if mcc and mcc not in MCC_GROUPS:
+            raise ValueError(f"unknown merchant category {mcc!r}: one of {sorted(MCC_GROUPS)}")
         with self._lock:
             self._reload()
+            new = copy.deepcopy(self.cfg)
             if mcc:
-                self.cfg["mcc_thresholds"][mcc] = thresholds
+                new["mcc_thresholds"][mcc] = thresholds
             else:
-                self.cfg["thresholds"] = thresholds
-            self.cfg["threshold_version"] += 1
-            self._save({"change": "thresholds", "mcc": mcc, "thresholds": thresholds, "requested_by": requested_by,
-                        "approved_by": approved_by, "reason": reason, "threshold_version": self.cfg["threshold_version"]})
+                new["thresholds"] = thresholds
+            new["threshold_version"] += 1
+            self._commit(new, {"change": "thresholds", "mcc": mcc, "thresholds": thresholds, "requested_by": requested,
+                               "approved_by": approved, "reason": reason, "threshold_version": new["threshold_version"]})
         return self.cfg
 
     def update_list(self, name: str, item: str, add: bool, by: str, reason: str) -> list[str]:
@@ -105,10 +124,11 @@ class RulesEngine:
             raise KeyError(name)
         with self._lock:
             self._reload()
-            items = set(self.cfg[name])
+            new = copy.deepcopy(self.cfg)
+            items = set(new[name])
             items.add(item) if add else items.discard(item)
-            self.cfg[name] = sorted(items)
-            self.cfg["rules_version"] += 1
-            self._save({"change": f"{'add' if add else 'remove'}:{name}", "item": item, "by": by, "reason": reason,
-                        "rules_version": self.cfg["rules_version"]})
+            new[name] = sorted(items)
+            new["rules_version"] += 1
+            self._commit(new, {"change": f"{'add' if add else 'remove'}:{name}", "item": item, "by": person(by),
+                               "reason": reason, "rules_version": new["rules_version"]})
         return self.cfg[name]

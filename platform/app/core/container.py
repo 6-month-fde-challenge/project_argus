@@ -11,7 +11,7 @@ from fastapi import Request
 
 from ..infra.docs_repo import DocsRepository
 from ..infra.gpu import GpuMonitor
-from ..infra.http_clients import ExplainerClient, MlflowClient, ScoringClient
+from ..infra.http_clients import ExplainerClient, MlflowClient, ScoringClient, StreamClient
 from ..infra.job_runner import DockerJobRunner, JobRunner
 from ..infra.job_store import JobStore
 from ..infra.profiles_repo import ProfileRepository
@@ -53,6 +53,10 @@ class Container:
     @cached_property
     def mlflow(self) -> MlflowClient:
         return MlflowClient(self.settings)
+
+    @cached_property
+    def stream(self) -> StreamClient:
+        return StreamClient(self.settings)
 
     @cached_property
     def explainer(self) -> ExplainerClient:

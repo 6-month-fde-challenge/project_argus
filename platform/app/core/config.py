@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     explainer_url: str = "http://explainer:8000"
     scoring_token: str = "demo-service-token"
     scoring_admin_token: str = "demo-admin-token"
+    stream_url: str = "http://stream:8003"          # stream service: local compose, or the AWS load balancer URL
+    stream_control_key: str = "local-control-key"   # X-Control-Key for traffic start / stop (stays server-side)
 
     # training jobs (launched as sibling containers through the Docker socket)
     training_image: str = "argus-training:latest"

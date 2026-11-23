@@ -56,11 +56,15 @@ class JobStore:
             self._write([job] + self._read())
             return job
 
-    def update(self, job_id: str, **fields) -> dict:
+    def update(self, job_id: str, expect: set[str] | None = None, **fields) -> dict | None:
+        """Change a job. With `expect`, only if its status is still one of those (compare-and-set): returns None
+        when it is not, so the scheduler and a user's cancel can never overwrite each other."""
         with self._lock:
             jobs = self._read()
             for j in jobs:
                 if j["id"] == job_id:
+                    if expect is not None and j["status"] not in expect:
+                        return None
                     j.update(fields)
                     if fields.get("status") in TERMINAL and not j.get("finished_at"):
                         j["finished_at"] = now()

@@ -33,6 +33,14 @@ training/.hf_cache/
 wandb/
 mlruns/
 
+# ---------- Deployment (deploy/terraform: lock files ARE committed) ----------
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform.tfstate.lock.info
+crash.log
+
 # ---------- Python ----------
 __pycache__/
 *.py[cod]

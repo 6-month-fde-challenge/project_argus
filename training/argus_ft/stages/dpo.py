@@ -90,6 +90,10 @@ def train_dpo(model, pairs, ref_c, ref_r, c, pad_id: int, seed: int, events=None
                                 loss=float(np.mean(losses[-c.grad_accum:])), learning_rate=c.lr)
             if step % 20 == 0:
                 print(f"dpo step {step}: loss {np.mean(losses[-20:]):.4f}")
+        if len(order) and step % c.grad_accum:  # the epoch's last, partial accumulation: apply it now, never carry it over
+            torch.nn.utils.clip_grad_norm_(params, 1.0)
+            opt.step()
+            opt.zero_grad()
     model.eval()
     return losses
 
@@ -134,7 +138,13 @@ def run(ctx) -> dict:
 
     # keep-the-best: DPO must not make the explainer worse than SFT on the held-out gold cases
     report = json.loads((ctx.run_dir / "report.json").read_text())
-    sft_metrics = report["stages"]["sft_explainer"]["validation"]
+    sft_metrics = (report["stages"].get("sft_explainer") or {}).get("validation")
+    if not sft_metrics:  # e.g. only `dpo` re-run in a folder whose report lost the SFT entry: measure SFT again
+        sft = load_with_adapter(ctx.teacher_base, str(ctx.run_dir / "explainer" / "sft_adapter"), "causal",
+                                quant_for(c.method), trainable=False)
+        sft_metrics, _ = evaluate_explainer(ctx, sft)
+        del sft
+        free_gpu()
     kept = "dpo" if _quality(metrics) >= _quality(sft_metrics) else "sft"
     merge_adapter(ctx.teacher_base, str(ctx.run_dir / "explainer" / f"{kept}_adapter"), ctx.path("explainer", "merged"),
                   "causal", tok)

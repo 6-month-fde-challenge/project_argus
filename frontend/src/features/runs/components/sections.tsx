@@ -257,6 +257,64 @@ function Quantize({ s }: { s: S }) {
   );
 }
 
+/* ------------------------------------------------------------------ acceptance (holdout) */
+function Acceptance({ s }: { s: S }) {
+  const scorers = Object.keys(s.scorers ?? {});
+  const curveOption = (kind: "pr" | "roc") => ({
+    ...baseOption(), grid: { left: 48, right: 16, top: 30, bottom: 40 },
+    xAxis: { type: "value", min: 0, max: 1, name: kind === "pr" ? "recall" : "false-positive rate", nameLocation: "middle", nameGap: 26, ...axisStyle },
+    yAxis: { type: "value", min: 0, max: 1, name: kind === "pr" ? "precision" : "recall", ...axisStyle },
+    series: scorers.map((k, i) => {
+      const c = s.scorers[k]?.curves?.[kind];
+      const pts = c ? (kind === "pr" ? c.recall.map((x: number, j: number) => [x, c.precision[j]]) : c.fpr.map((x: number, j: number) => [x, c.tpr[j]])) : [];
+      return { name: SCORER_LABEL[k] ?? k, type: "line", showSymbol: false, step: kind === "pr" ? "end" : undefined, data: pts, color: PALETTE[i] };
+    }),
+  });
+  const pr = useMemo(() => curveOption("pr"), [s]); // eslint-disable-line react-hooks/exhaustive-deps
+  const roc = useMemo(() => curveOption("roc"), [s]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!s.objectives) return <EmptyState title="No acceptance results" />;
+  const go = s.verdict === "GO";
+  const served = s.scorers?.[s.served];
+  const thr = (t: S | null | undefined) => t ? `${fmt.pct(t.recall)} / ${fmt.pct(t.precision)} / ${fmt.pct(t.false_positive_rate, 2)} / ${fmt.int(t.flagged_per_day)}` : "–";
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+        <Card><CardHeader title="CRD success criteria on the holdout" subtitle={`${SCORER_LABEL[s.served] ?? s.served} · ${fmt.int(s.rows)} rows (${fmt.int(s.fraud)} fraud) · frozen stage-8 calibrator · policy REVIEW 0.60 / BLOCK 0.85`} />
+          <CardBody>
+            <Table head={["objective", "measure", "value", "target", "result"]} rows={(s.objectives as S[]).map((c) => [
+              <span className="font-medium">{c.id}</span>, <span title={c.note}>{c.name}</span>,
+              c.value == null ? "–" : typeof c.value === "number" && !Number.isInteger(c.value) ? fmt.num(c.value, 4) : fmt.int(c.value),
+              c.target, c.pass == null ? <Badge tone="neutral">n/a</Badge> : c.pass ? <Badge tone="ok">pass</Badge> : <Badge tone="bad">fail</Badge>])} />
+          </CardBody>
+        </Card>
+        <div className="space-y-3">
+          <Metric label="verdict" value={<Badge tone={go ? "ok" : "bad"}>{s.verdict}</Badge>} />
+          <Metric label="failing" value={<span className="text-sm">{s.failing?.length ? s.failing.join(", ") : "none"}</span>} tone={go ? "text-ok" : "text-warn"} />
+          <Metric label={`latency p50 / p99 (${s.latency?.scorer === "xgboost" ? "XGBoost" : "FP8 LLM"})`} value={`${fmt.num(s.latency?.p50_ms, 1)} / ${fmt.num(s.latency?.p99_ms, 1)} ms`} />
+          <div className="text-[11px] text-muted">{s.latency?.where}</div>
+        </div>
+      </div>
+      <Card><CardHeader title="Thresholds: policy vs recommended" subtitle="Recommended cut-offs are chosen on the later half of validation for the recall / precision targets, then measured here on the holdout. Apply them only through Rules & policy (two-person approval)." />
+        <CardBody>
+          <Table head={["scorer", "PR-AUC", "ECE", "policy REVIEW: recall / precision / FPR / per day", "policy BLOCK", "recommended cut-offs", "recommended REVIEW", "recommended BLOCK"]}
+            rows={scorers.map((k) => {
+              const r = s.scorers[k], rec = r.recommended ?? {};
+              return [<span className="font-medium">{SCORER_LABEL[k] ?? k}{k === s.served && <Badge tone="brand" className="ml-2">served</Badge>}</span>,
+                fmt.num(r.holdout?.pr_auc), fmt.num(r.ece, 4), thr(r.policy?.at_review), thr(r.policy?.at_block),
+                rec.review_threshold == null ? "–" : `${fmt.num(rec.review_threshold, 4)} / ${fmt.num(rec.block_threshold, 4)}`,
+                thr(rec.at_review), thr(rec.at_block)];
+            })} />
+          {served?.reason_f1_per_code && <div className="mt-3"><KeyValue data={Object.fromEntries(Object.entries(served.reason_f1_per_code).map(([c, v]) => [`F1 ${REASONS[c]?.label ?? c}`, fmt.num(v as number)]))} /></div>}
+        </CardBody>
+      </Card>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card><CardHeader title="Precision-recall on the holdout" /><CardBody><EChart option={pr} height={260} /></CardBody></Card>
+        <Card><CardHeader title="ROC on the holdout" /><CardBody><EChart option={roc} height={260} /></CardBody></Card>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ generic training stage */
 function Generic({ s }: { s: S }) {
   const flat = Object.fromEntries(Object.entries(s).flatMap(([k, v]) =>
@@ -271,6 +329,7 @@ export const SECTION_RENDERERS: Record<string, (p: { s: S; sections: S; run: str
   pilot: ({ s }) => <Pilot s={s} />,
   gate: ({ s }) => <Gate s={s} />,
   calibrate: ({ s }) => <Calibrate s={s} />,
+  acceptance: ({ s }) => <Acceptance s={s} />,
   quantize: ({ s }) => <Quantize s={s} />,
   sft_explainer: ({ sections, run }) => <Explainers sections={sections} run={run} />,
   dpo: ({ sections, run }) => <Explainers sections={sections} run={run} />,
@@ -280,4 +339,4 @@ export const SECTION_RENDERERS: Record<string, (p: { s: S; sections: S; run: str
 export const renderSection = (stage: string, sections: S, run: string) =>
   (SECTION_RENDERERS[stage] ?? (({ s }) => <Generic s={s} />))({ s: sections[stage] ?? {}, sections, run });
 
-export { Calibrate, Explainers, Gate, Pilot, Quantize };
+export { Acceptance, Calibrate, Explainers, Gate, Pilot, Quantize };

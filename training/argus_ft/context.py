@@ -89,7 +89,10 @@ class Ctx:
 
     def scorer_train_rows(self, stage: str) -> list[dict]:
         c = self.cfg[stage]
-        return D.downsample_negatives(self.sft("train"), c["neg_per_pos"], self.cfg.seed + c.get("seed_offset", 0))
+        rows = self.sft("train")
+        if (self.cfg.get("label_maturity") or {}).get("eligible_only"):
+            rows = D.mature_labels_only(rows)
+        return D.downsample_negatives(rows, c["neg_per_pos"], self.cfg.seed + c.get("seed_offset", 0))
 
     # ------------------------------------------------------------ artefacts
 

@@ -2,7 +2,7 @@
 extends: base.yaml
 run_name: smoke
 
-eval: {max_rows: 1000}                     # random 1,000 validation rows (~6 fraud)
+eval: {max_rows: 3000}                     # random 3,000 rows (~18 fraud): each calibration half keeps fraud
 pilot: {max_steps: 3, val_rows: 500}
 gate: {mode: llm}                          # exercise every stage whatever the gate measures
 cpt: {max_docs: 30, max_steps: 5}

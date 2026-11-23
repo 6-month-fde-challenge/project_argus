@@ -1,0 +1,12 @@
+# Files that run on Linux (GPU VM, containers, CI) keep LF even in a Windows checkout (core.autocrlf=true).
+*.sh            text eol=lf
+*.py            text eol=lf
+*.tf            text eol=lf
+*.hcl           text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.ini           text eol=lf
+*.txt           text eol=lf
+Dockerfile      text eol=lf
+.env.example    text eol=lf
+*.ps1           text eol=crlf

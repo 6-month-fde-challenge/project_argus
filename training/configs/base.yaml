@@ -11,7 +11,7 @@ max_length: 384             # transaction prompt token cap; oldest [HIST] entrie
 gpu_memory_fraction: 0.95   # hard VRAM cap: fail with OOM instead of spilling into shared system RAM
 
 stages: [data_checks, xgboost, pilot, gate, cpt, sft_scorer, sft_explainer, dpo,
-         distill_scorer, distill_explainer, quantize, calibrate, registry]
+         distill_scorer, distill_explainer, quantize, calibrate, acceptance, registry]
 
 efficiency:                 # applied to every Trainer run (stages/common.py)
   liger: true               # Liger kernels: fused RMSNorm/SwiGLU/RoPE + linear-cross-entropy (big-vocab memory)
@@ -32,16 +32,23 @@ lora:
 
 eval:
   batch_size: 32
-  max_rows: 5000            # random validation sample, ~32 fraud (inference is ~25 rows/s on a 3050); prod: all
+  max_rows: 5000            # random validation / holdout sample, ~32 fraud (inference ~25 rows/s on a 3050); prod: all
+
+label_maturity:             # labels mature 60 days after the transaction (CRD); see data_checks.label_maturity
+  eligible_only: false      # true: train scorers only on rows whose label was known when validation starts (strict
+                            #   backtest; drops 14,265 train rows incl. 96 of 438 frauds on this dataset)
 
 # 0 ------------------------------------------------------------- data checks (no settings)
 data_checks: {}
 
 # 1 ------------------------------------------------------------- XGBoost baseline (DB features)
 xgboost:
-  n_estimators: 400
-  max_depth: 6
-  learning_rate: 0.05
+  n_estimators: 3000        # upper bound: early stopping picks the number of trees
+  early_stopping_rounds: 200  # on the earlier half of validation (the calibration half); null = fixed n_estimators
+  max_depth: 5
+  learning_rate: 0.03
+  min_child_weight: 5
+  scale_pos_weight: sqrt    # sqrt(genuine / fraud) | ratio (genuine / fraud)
 
 # 2 ------------------------------------------------------------- pilot: 3 models x 2 formats, LoRA
 pilot:
@@ -142,6 +149,18 @@ quantize:
 # 8 ------------------------------------------------------------- calibration + evaluation
 calibrate: {}
 
+# 9 ------------------------------------------------------------- acceptance on the holdout (GO / NO-GO)
+acceptance:
+  targets:                  # CRD 4 success criteria, checked on the holdout at the policy thresholds
+    recall: 0.85            # OBJ-01 fraud recall at REVIEW (also the target the recommended REVIEW cut-off aims at)
+    precision_at_block: 0.70  # OBJ-02 (also the target the recommended BLOCK cut-off aims at)
+    pr_auc: 0.80            # OBJ-03
+    uplift: 0.03            # OBJ-04 PR-AUC over XGBoost (LLM-scorer runs only)
+    false_decline_rate: 0.014  # OBJ-08 genuine payments blocked
+    review_per_day: 12000   # OBJ-09
+    p99_latency_ms: 250     # OBJ-10 (model share, in-process)
+  latency_samples: 50       # single-transaction scoring calls timed after 5 warm-up calls
+
 #   ------------------------------------------------------------- registry (MLflow, outputs/mlruns)
 registry: {}
 
@@ -155,3 +174,5 @@ api:
   explain_cutoff_ms: 220          # LLD 6.3: REVIEW/BLOCK wait at most this long for the explainer
   async_explain_timeout_s: 5      # FR-API-05: async explanations in the audit log within 5 s
   time_window_minutes: 15         # LLD 4.1: transaction_time within +-15 min of server time
+  max_concurrent_scoring: 4       # admission control: more waiting than this and the deadline passes -> 503 (fail-open)
+  allow_forced_runs: false        # production: a run that forced the week-8 branch (demo) is never activated

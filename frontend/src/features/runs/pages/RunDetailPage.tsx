@@ -58,7 +58,8 @@ export default function RunDetailPage() {
       <Link to="/runs" className="mb-3 inline-flex items-center gap-1 text-xs text-muted hover:text-ink"><ArrowLeft className="h-3.5 w-3.5" /> All runs</Link>
       <PageHeader eyebrow={data.profile?.replace("configs/", "")} title={<span className="flex items-center gap-3">{data.name}<StatusBadge status={data.status} /></span>}
         subtitle={<span className="flex flex-wrap items-center gap-2">
-          {data.gate && <Badge tone={data.gate.decision === "LLM" ? "brand" : "violet"}>gate {data.gate.decision}{data.gate.mode && data.gate.mode !== "auto" ? ` · branch ${data.gate.branch}` : ""}</Badge>}
+          {data.gate && <Badge tone={data.gate.branch === "LLM" ? "brand" : "violet"}>gate measured {data.gate.decision} · ran {data.gate.branch ?? data.gate.decision}</Badge>}
+          {data.gate?.forced && <Badge tone="warn">demo run, never promotable: {data.gate.forced_reason ?? `branch forced (gate.mode=${data.gate.mode})`}</Badge>}
           {data.scorer && <Badge tone="brand">scorer: {data.scorer}</Badge>}
           {data.pilot_winner && <Badge>teacher {fmt.model(data.pilot_winner.teacher)} · {data.pilot_winner.format}</Badge>}
           {data.reused_from && <Badge tone="violet">reuses {data.reused_from}</Badge>}

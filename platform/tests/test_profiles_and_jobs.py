@@ -109,3 +109,28 @@ def test_cancel_running_and_finished_jobs(container, runner):
     assert svc.cancel(a["id"])["status"] == "cancelled" and runner.stopped == [f"cid-{a['id']}"]
     with pytest.raises(Conflict):
         svc.cancel(a["id"])
+
+
+def test_a_job_cancelled_while_its_container_starts_is_stopped_not_resurrected(container, runner):
+    svc = JobService(container)
+    job = svc.create(JobRequest(profile="smoke", run_name="race_me"))
+    launch = runner.launch
+
+    def slow_launch(job_id, run_name, command):  # the user cancels while docker is still starting the container
+        cid = launch(job_id, run_name, command)
+        svc.cancel(job_id)
+        return cid
+
+    runner.launch = slow_launch
+    svc.tick()
+    assert container.jobs.get(job["id"])["status"] == "cancelled"
+    assert runner.stopped == [f"cid-{job['id']}"] and not runner.states[f"cid-{job['id']}"].running
+
+
+def test_a_finished_container_never_overwrites_a_cancel(container, runner):
+    svc = JobService(container)
+    job = svc.create(JobRequest(profile="smoke", run_name="done_or_not"))
+    svc.tick()
+    container.jobs.update(job["id"], status="cancelled")
+    svc.tick()  # its container has exited meanwhile: the job stays cancelled
+    assert container.jobs.get(job["id"])["status"] == "cancelled"

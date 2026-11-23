@@ -24,6 +24,7 @@ RESPONSE_SCHEMA = {
 }
 GUARD_STATUS = {"invalid_json": "SCHEMA_FAILED", "schema": "SCHEMA_FAILED", "ungrounded_number": "GROUNDING_FAILED"}
 BREAKER_OPEN_S = 5  # LLD 6.1: after a failure, skip the dependency and try again (half-open) after 5 s
+TIMEOUTS_TO_TRIP = 3  # consecutive timeouts that also open the breaker (a slow explainer, not only a dead one)
 
 
 def consistent(llm_codes: list[str], scorer_codes: list[str]) -> bool:
@@ -33,12 +34,15 @@ def consistent(llm_codes: list[str], scorer_codes: list[str]) -> bool:
 
 
 class Explainer:
-    def __init__(self, url: str, data_dir: str, val_rows: int, max_tokens: int):
+    def __init__(self, url: str, data_dir: str, val_rows: int, max_tokens: int, max_in_flight: int = 4):
         self.url, self.max_tokens = url.rstrip("/"), max_tokens
         gold_train, _ = D.load_gold(data_dir, val_rows)
         self.guard = ExplanationGuard(gold_train)
-        self.client = httpx.AsyncClient()
+        self.client = httpx.AsyncClient(limits=httpx.Limits(max_connections=max_in_flight))
         self._open_until = 0.0  # circuit breaker: while open, explanations come straight from templates
+        # vLLM shares the GPU with the scorer: at most `max_in_flight` explanation calls at once; past that the
+        # reason-code template answers at once instead of queueing work that would slow scoring down
+        self.max_in_flight, self.in_flight, self.timeouts = max_in_flight, 0, 0
 
     def template(self, codes: list[str]) -> str:
         return self.guard.template(codes)["explanation"]
@@ -61,6 +65,15 @@ class Explainer:
         start = time.perf_counter()
         if time.monotonic() < self._open_until:  # breaker open: explainer known to be down
             return self.template(codes), "TEMPLATE", 0
+        if self.in_flight >= self.max_in_flight:  # explainer saturated: never queue behind it
+            return self.template(codes), "TEMPLATE", 0
+        self.in_flight += 1
+        try:
+            return await self._explain(prompt, codes, timeout_s, start)
+        finally:
+            self.in_flight -= 1
+
+    async def _explain(self, prompt: str, codes: list[str], timeout_s: float, start: float) -> tuple[str | None, str, int]:
         try:
             resp = await self.client.post(f"{self.url}/v1/chat/completions", timeout=timeout_s, json={
                 "model": "argus-explainer", "temperature": 0, "max_tokens": self.max_tokens,
@@ -70,10 +83,15 @@ class Explainer:
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
         except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):  # slow: reply now, explain async
+            self.timeouts += 1
+            if self.timeouts >= TIMEOUTS_TO_TRIP:  # persistently slow: stop feeding it for a while
+                self._trip()
+                self.timeouts = 0
             return None, "EXPLANATION_ASYNC", int((time.perf_counter() - start) * 1000)
         except (httpx.HTTPError, KeyError, ValueError):  # down / bad reply (incl. connect timeout): template
             self._trip()
             return self.template(codes), "TEMPLATE", int((time.perf_counter() - start) * 1000)
+        self.timeouts = 0
         obj, status = self.guard.check(text, prompt)
         latency = int((time.perf_counter() - start) * 1000)
         if obj is None:

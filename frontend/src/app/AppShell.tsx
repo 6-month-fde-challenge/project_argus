@@ -79,6 +79,7 @@ function TopBar() {
         <ServicePill name="scoring" status={svc?.scoring} />
         <ServicePill name="vLLM" status={svc?.explainer} />
         <ServicePill name="MLflow" status={svc?.mlflow} href={svc?.mlflow === "ok" ? svc.mlflow_url : undefined} />
+        {svc?.stream === "ok" && <ServicePill name="stream" status="ok" />}
         {g && (
           <Tip content={`${g.name}: ${g.memory_used_mb} / ${g.memory_total_mb} MB, ${g.utilization_pct}% util, ${g.temperature_c}°C`}>
             <span className="ml-2 flex items-center gap-2 rounded-full border border-line bg-white/[0.03] px-2.5 py-1 text-[11px] text-muted">

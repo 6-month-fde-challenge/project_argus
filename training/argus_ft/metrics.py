@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import json
+import math
 
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
+from sklearn.metrics import average_precision_score, f1_score, precision_recall_curve, roc_auc_score, roc_curve
 
 from .data import REASON_CODES, answer_codes
 
@@ -66,6 +67,15 @@ class Calibrator:
         return {"method": "isotonic", "x": self.model.X_thresholds_.tolist(), "y": self.model.y_thresholds_.tolist()}
 
 
+def apply_calibration(params: dict, scores: np.ndarray) -> np.ndarray:
+    """A saved calibrator (`Calibrator.to_dict()`, i.e. calibration/<scorer>.json) applied to raw scores, exactly as the
+    scoring API applies it at serving time."""
+    scores = np.asarray(scores, dtype=np.float64)
+    if params["method"] == "platt":
+        return 1 / (1 + np.exp(-(params["slope"] * scores + params["intercept"])))
+    return np.interp(scores, params["x"], params["y"])
+
+
 def ece(probs: np.ndarray, labels: np.ndarray, bins: int = 10) -> float:
     """Expected calibration error over equal-width probability bins."""
     edges = np.linspace(0, 1, bins + 1)
@@ -106,6 +116,52 @@ def at_review_capacity(scores: np.ndarray, labels: np.ndarray, amounts: np.ndarr
 def threshold_report(probs: np.ndarray, labels: np.ndarray, thresholds=SWEEP) -> list[dict]:
     """Precision, recall and daily flagged volume per cut-off (FR-ML-12, TR-ML-04)."""
     return [at_threshold(probs, labels, t) for t in thresholds]
+
+
+def threshold_for_recall(probs: np.ndarray, labels: np.ndarray, target: float) -> float | None:
+    """The highest cut-off that still flags at least `target` of the fraud (OBJ-01 recall at REVIEW).
+    None when the slice has no fraud to measure recall on."""
+    fraud = np.sort(probs[labels == 1])[::-1]
+    if not len(fraud):
+        return None
+    return float(fraud[max(1, math.ceil(target * len(fraud))) - 1])
+
+
+def threshold_for_precision(probs: np.ndarray, labels: np.ndarray, target: float) -> float | None:
+    """The lowest cut-off whose flagged set still has precision >= `target` (OBJ-02 precision at BLOCK), or the
+    best-precision cut-off when the target is never reached. None when the slice has no fraud."""
+    if not (labels == 1).any():
+        return None
+    order = np.argsort(-probs, kind="stable")
+    sorted_probs = probs[order]
+    precision = np.cumsum(labels[order]) / np.arange(1, len(order) + 1)
+    # a cut-off flags every row with prob >= it, so only the last row of each run of tied scores is a real
+    # operating point: judging a tie group part-way would claim a precision no threshold can deliver
+    ends = np.flatnonzero(np.append(sorted_probs[1:] != sorted_probs[:-1], True))
+    ok = ends[precision[ends] >= target]
+    return float(sorted_probs[ok[-1] if len(ok) else ends[int(np.argmax(precision[ends]))]])
+
+
+def curves(scores: np.ndarray, labels: np.ndarray, points: int = 100) -> dict:
+    """PR and ROC curves thinned to at most `points` points each (small enough for report.json and the UI)."""
+    if labels.min() == labels.max():
+        return {}
+    precision, recall, _ = precision_recall_curve(labels, scores)
+    fpr, tpr, _ = roc_curve(labels, scores)
+
+    def thin(xs, ys):
+        idx = np.unique(np.linspace(0, len(xs) - 1, min(points, len(xs))).astype(int))
+        return [round(float(v), 5) for v in xs[idx]], [round(float(v), 5) for v in ys[idx]]
+
+    r, p = thin(recall, precision)
+    f, t = thin(fpr, tpr)
+    return {"pr": {"recall": r, "precision": p}, "roc": {"fpr": f, "tpr": t}}
+
+
+def per_code_f1(logits: np.ndarray, targets: np.ndarray) -> dict:
+    """F1 of every reason-code head at 0.5 (columns 1..8 of the scorer output) against the weak feature-rule targets."""
+    pred, gold = (logits[:, 1:] > 0).astype(int), targets[:, 1:].astype(int)
+    return {code: round(float(f1_score(gold[:, i], pred[:, i], zero_division=0)), 4) for i, code in enumerate(REASON_CODES)}
 
 
 def group_error_rates(probs: np.ndarray, labels: np.ndarray, groups: np.ndarray, threshold: float) -> dict:

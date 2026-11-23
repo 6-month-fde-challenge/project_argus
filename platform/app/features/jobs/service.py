@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from ...core.container import Container
 from ...core.errors import BadRequest, Conflict, UpstreamError
-from ...infra.job_store import now
+from ...infra.job_store import ACTIVE, now
 from ..runs.service import DEFAULT_LADDER
 
 log = logging.getLogger("argus.jobs")
@@ -82,12 +82,14 @@ class JobService:
         return job
 
     def cancel(self, job_id: str) -> dict:
-        job = self.c.jobs.get(job_id)
-        if job["status"] not in ("queued", "running"):
-            raise Conflict(f"job is already {job['status']}")
+        # mark it cancelled first (only if still active), then stop whatever container it has by now: if the scheduler
+        # launches it meanwhile, its own compare-and-set to "running" fails and it stops the container itself
+        job = self.c.jobs.update(job_id, expect=ACTIVE, status="cancelled", message="cancelled by user")
+        if job is None:
+            raise Conflict(f"job is already {self.c.jobs.get(job_id)['status']}")
         if job["container_id"]:
             self.c.runner.stop(job["container_id"])
-        return self.c.jobs.update(job_id, status="cancelled", message="cancelled by user")
+        return job
 
     # ------------------------------------------------------------ scheduler
 
@@ -98,9 +100,10 @@ class JobService:
                 continue
             st = self.c.runner.state(job["container_id"])
             if st is None:
-                self.c.jobs.update(job["id"], status="failed", message="container disappeared")
+                self.c.jobs.update(job["id"], expect={"running"}, status="failed", message="container disappeared")
             elif not st.running:
-                self.c.jobs.update(job["id"], status="succeeded" if st.exit_code == 0 else "failed", exit_code=st.exit_code,
+                self.c.jobs.update(job["id"], expect={"running"}, status="succeeded" if st.exit_code == 0 else "failed",
+                                   exit_code=st.exit_code,
                                    message=None if st.exit_code == 0 else f"exited with code {st.exit_code}")
         if any(j["status"] == "running" for j in self.c.jobs.active()):
             return
@@ -114,7 +117,11 @@ class JobService:
                 self.c.jobs.update(nxt["id"], message=msg)
             return
         cid = self.c.runner.launch(nxt["id"], nxt["run_name"], nxt["command"])
-        self.c.jobs.update(nxt["id"], status="running", container_id=cid, started_at=now(), message=None)
+        if self.c.jobs.update(nxt["id"], expect={"queued"}, status="running", container_id=cid, started_at=now(),
+                              message=None) is None:  # cancelled while its container was starting
+            self.c.runner.stop(cid)
+            log.info("job %s was cancelled during launch: stopped container %s", nxt["id"], cid[:12])
+            return
         log.info("started job %s (%s) in container %s", nxt["id"], nxt["run_name"], cid[:12])
 
 

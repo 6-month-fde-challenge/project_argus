@@ -13,7 +13,10 @@ import { Badge, Button, Card, CardBody, CardHeader, EmptyState, ErrorState, Page
 import { CodeView, JsonView } from "@/shared/ui/content";
 import { Dialog, Tip } from "@/shared/ui/overlays";
 
-interface Deployments { active: string | null; models: { run: string; scorer: string; loaded: boolean; active: boolean }[] }
+interface Deployments {
+  active: string | null; shadow?: string | null;
+  models: { run: string; scorer: string; loaded: boolean; active: boolean; shadow?: boolean; forced?: boolean; forced_reason?: string | null }[];
+}
 interface Decision extends ScoreResponse { logged_at: string; explanation_source: string | null; feature_source: string | null }
 
 const DECISION_STYLE = {
@@ -84,7 +87,8 @@ function DeploymentsCard() {
         {data?.models.length === 0 && <div className="text-xs text-muted">No servable runs yet.</div>}
         {data?.models.map((m) => (
           <div key={m.run} className={cn("flex items-center gap-3 rounded-xl border px-3 py-2", m.active ? "border-brand/40 bg-brand/[0.06]" : "border-line")}>
-            <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium">{m.run}</div><div className="text-[11px] text-muted">{m.scorer === "llm" ? "FP8 LLM scorer" : "XGBoost (HYBRID)"}{m.loaded && " · warm"}</div></div>
+            <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium">{m.run}</div><div className="text-[11px] text-muted">{m.scorer === "llm" ? "FP8 LLM scorer" : "XGBoost (HYBRID)"}{m.loaded && " · warm"}{m.shadow && " · shadow"}</div></div>
+            {m.forced && <Tip content={`Not a measured run: ${m.forced_reason ?? "the week-8 branch was forced"}. A demo, never promotable: a production profile refuses to activate it.`}><span><Badge tone="warn">demo · forced</Badge></span></Tip>}
             {m.active ? <Badge tone="ok"><CheckCircle2 className="h-3 w-3" /> live</Badge>
               : <Button size="sm" onClick={() => activate.mutate(m.run)} loading={activate.isPending && activate.variables === m.run}>Activate</Button>}
           </div>

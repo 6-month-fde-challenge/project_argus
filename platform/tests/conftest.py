@@ -121,7 +121,8 @@ def runner() -> FakeRunner:
 def container(tree, runner) -> Container:
     settings = Settings(outputs_dir=tree["outputs"], configs_dir=tree["configs"], data_dir=tree["data"],
                         docs_dir=tree["docs"], diagrams_dir=tree["diagrams"],
-                        scoring_url="http://127.0.0.1:9", mlflow_url="http://127.0.0.1:9", explainer_url="http://127.0.0.1:9")
+                        scoring_url="http://127.0.0.1:9", mlflow_url="http://127.0.0.1:9", explainer_url="http://127.0.0.1:9",
+                        stream_url="http://127.0.0.1:9")
     return Container(settings, runner_override=runner)
 
 

@@ -28,7 +28,7 @@ from transformers import set_seed
 from .config import load_config
 from .context import Ctx
 from .events import EventLog
-from .runs import seed_from
+from .runs import drop_llm_scorer, seed_from
 from .stages import LADDER
 from .supabase_data import fetch_tables, sync
 
@@ -123,7 +123,12 @@ def main() -> None:
         result = report["stages"][name] = run_stage(name, args.config, args.set)
         events.emit("stage_end", stage=name, status=result["status"], minutes=result.get("minutes"),
                     peak_gpu_gb=result.get("peak_gpu_gb"), error=(result.get("error") or "")[-2000:] or None)
-        skipped |= set(result.get("skip_stages", []))
+        if result.get("skip_stages"):  # HYBRID: no stale LLM scorer may survive in this folder or its report
+            skipped |= set(result["skip_stages"])
+            for stale in result["skip_stages"]:
+                report["stages"].pop(stale, None)
+            if removed := drop_llm_scorer(ctx.run_dir):
+                print(f"    removed stale LLM-scorer artefacts: {', '.join(removed)}")
         report["total_minutes"] = round((time.time() - t0) / 60, 2)
         report_path.write_text(json.dumps(report, indent=2))
         print(json.dumps(result, indent=2)[:3000])
