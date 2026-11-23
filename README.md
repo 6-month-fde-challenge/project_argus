@@ -877,6 +877,7 @@ argus_solution/
   argus.ps1             the command wrapper (sections 12-19)
   docker-compose.yml    every service; profiles: default | serve | job
   .env.example          template for .env (secrets; .env itself is git-ignored)
+  docs/README.md        links to the client documents and write-ups in the argus repo
   training/             argus_ft (the ladder, stages/, events, data, supabase sync) + configs/  -> image argus-training
     data/  outputs/  .hf_cache/     runtime state, bind-mounted (not in the image)
   scoring_api/          argus_api (CRD 10 / LLD 2-6) + tests/  -> image argus-scoring
