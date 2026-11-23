@@ -22,8 +22,10 @@ This folder holds the complete working solution:
 | Operating it | [17. Logs](#17-logs-where-to-look) · [18. Where to change things](#18-where-to-change-things) · [19. Tests](#19-tests) · [20. Troubleshooting](#20-troubleshooting) |
 | Results and plan | [21. Results](#21-results-so-far) · [22. Local vs production](#22-local-demo-vs-production) · [23. Plan](#23-plan) · [24. Risks](#24-risks-and-mitigations) · [25. Folder layout](#25-folder-layout) · [26. Demo video](#26-demo-video) |
 
-The client documents are in `01_argus/client_docs/`: CRD, Architecture, Capacity Planning, HLD and LLD.
-The delivery team's own write-ups are in `01_argus/day_wise/part_01..05`: client understanding, technical
+The client documents are not in this repo. They live in the separate `argus` repo, which is the parent folder
+`01_argus/` (this repo is cloned inside it as `01_argus/argus_solution/`):
+`01_argus/client_docs/` holds the CRD, Architecture, Capacity Planning, HLD and LLD, and
+`01_argus/day_wise/part_01..05` holds the delivery team's own write-ups: client understanding, technical
 requirements, proposed solution with diagrams, client questions, mock meeting.
 Section numbers below such as "CRD 10.2" or "LLD 4.1" point into those documents.
 
@@ -556,6 +558,7 @@ Newest first:
 From `01_argus/argus_solution/` in PowerShell:
 
 ```powershell
+copy .env.example .env     # first time only: fill in SUPABASE_URL / SUPABASE_KEY
 .\argus.ps1 build          # all images (first time: 20-30 min plus downloads, mostly the training image)
 .\argus.ps1 up             # UI, platform API, MLflow
 start http://localhost:3000
@@ -872,31 +875,19 @@ argus_solution/
   README.md             this file
   argus.ps1             the command wrapper (sections 12-19)
   docker-compose.yml    every service; profiles: default | serve | job
+  .env.example          template for .env (secrets; .env itself is git-ignored)
   training/             argus_ft (the ladder, stages/, events, data, supabase sync) + configs/  -> image argus-training
     data/  outputs/  .hf_cache/     runtime state, bind-mounted (not in the image)
   scoring_api/          argus_api (CRD 10 / LLD 2-6) + tests/  -> image argus-scoring
   platform/             FastAPI control plane: app/core, app/infra, app/features/<area> + tests/  -> image argus-platform
   frontend/             React 19 + Vite + TypeScript: src/app (shell, registry), src/shared, src/features/<page>
-  demo/                 the final demo video, captions, YouTube text
-  demo_video/           scripts to re-record the demo video chapters
+
+outside this repo, in the parent folder 01_argus/ (the separate `argus` repo):
+  client_docs/          client documents, mounted read-only into the platform (Docs page)
+  day_wise/             write-ups; day_wise/part_03/diagrams is mounted for the Docs page
 ```
 
 ## 26. Demo video
 
-**Files.** The narrated walkthrough (British English voice, 4K) is
-`demo/Project_01_ARGUS_Part_06_Live_Demo.mp4`, with captions (`.srt`) and YouTube text next to it.
-
-**How it was made.** It was recorded from the running UI, chapter by chapter, with the technical-demo-video skill.
-The scripts live in `demo_video/`:
-
-| File | Purpose |
-|---|---|
-| `chNN_*/flow.json` | one chapter: the UI steps (navigate, click, fill, highlight) and the narration for each |
-| `rec4k.py` + `rec4k_patches.py` | records a chapter (headless Chromium + edge-tts `gb-male`), with the networkidle cap live pages need |
-| `dryrun.py` | runs a chapter's steps without narration to prove every selector resolves (steps marked `dry_skip` are skipped, e.g. the Launch click) |
-
-**Re-recording one chapter after a UI change.** The stack must be up, with serving started for ch08b:
-```powershell
-C:\dv\Scripts\python demo_video\dryrun.py ch05_runs
-C:\dv\Scripts\python demo_video\rec4k.py --flow-dir demo_video\ch05_runs --base-url http://localhost:3000 --voice gb-male --viewport 1920x1080 --out demo_video\ch05_runs\ch05_runs.mp4
-```
+The narrated walkthrough of the running UI was recorded separately and is published outside this repo. Video
+files and recording scripts are not version-controlled here (see `.gitignore`).
