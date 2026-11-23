@@ -546,10 +546,10 @@ Newest first:
 |---|---|
 | Docker Desktop (WSL 2 backend) with GPU support | `docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi` must print your GPU |
 | NVIDIA GPU, bf16-capable (Ampere or newer) | local demo sized for a 4 GB RTX 3050 Laptop; production profile for an A100 80GB |
-| `01_argus/.env` | `SUPABASE_URL`, `SUPABASE_KEY` (data sync); optional `HF_TOKEN` (gated models in production) |
+| `.env` (this folder) | copy `.env.example` to `.env`: `SUPABASE_URL`, `SUPABASE_KEY` (data sync); optional `HF_TOKEN` (gated models in production). Git-ignored. |
 | Disk | about 70 GB: training image 13 GB (scoring shares its layers), vLLM image 35 GB, build cache, models and outputs about 16 GB |
 
-`client_docs/`, `day_wise/` and `.env` stay where they are in `01_argus/`; compose mounts them read-only.
+`.env` lives in this folder next to `docker-compose.yml`. The client documents (`client_docs/`, `day_wise/`) stay in `01_argus/`, one level up; compose mounts them read-only for the Docs page.
 
 ## 12. Quick start
 
@@ -800,7 +800,7 @@ real data.
 | Registry | MLflow on SQLite | MLflow (or SageMaker registry), approved versions only, 7-day shadow (MLOPS-06) |
 | Infrastructure | Docker Compose | Terraform, CI/CD, dashboards and drift alerts (NFR-13, MLOPS-01..04) |
 
-**Moving to the A100.** Copy `argus_solution/` and `.env` to the GPU VM, then:
+**Moving to the A100.** Copy `argus_solution/` (including its `.env`) to the GPU VM, then:
 ```bash
 docker compose build trainer
 docker compose run --rm trainer python -m argus_ft.pipeline --config configs/prod_a100.yaml

@@ -5,7 +5,7 @@
 #   docker compose --profile serve up -d                         # + Fraud Model API :8080 and vLLM explainer :8000
 #   docker compose run --rm trainer python -m argus_ft.pipeline --config configs/smoke.yaml   # a run from the CLI
 #
-# Secrets (SUPABASE_URL / SUPABASE_KEY, optional HF_TOKEN) come from ../.env (01_argus/.env).
+# Secrets (SUPABASE_URL / SUPABASE_KEY, optional HF_TOKEN) come from .env in this folder (copy .env.example to .env).
 # The GPU is shared on a 4 GB card: the platform queues training while scoring / explainer hold it.
 
 x-gpu: &gpu
@@ -43,7 +43,7 @@ services:
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}   # set a PyPI mirror on slow networks
     image: argus-platform:latest
-    env_file: ../.env
+    env_file: .env
     environment:
       ARGUS_MLFLOW_PUBLIC_URL: http://localhost:5000
       ARGUS_TRAINING_IMAGE: argus-training:latest
@@ -83,7 +83,7 @@ services:
     image: argus-scoring:latest
     pull_policy: never
     profiles: ["serve"]
-    env_file: ../.env
+    env_file: .env
     environment:
       ARGUS_CONFIG: configs/local_demo.yaml
       ARGUS_RUN: ${RUN_NAME:-argus_demo_llm_scorer}   # deployed at start-up; switch at runtime from the UI
@@ -114,6 +114,6 @@ services:
     image: argus-training:latest
     pull_policy: never
     profiles: ["job"]
-    env_file: ../.env
+    env_file: .env
     volumes: *training-volumes
     shm_size: "8gb"
