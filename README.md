@@ -623,6 +623,7 @@ yourself instead. `.\argus.ps1` with no arguments lists the actions.
 | `stream [stop]` | `docker compose --profile stream up -d kinesis stream` |
 | `prefetch <profile>` | `docker compose run --rm --no-deps trainer python -m argus_ft.prefetch --config configs/<profile>.yaml` |
 | `aws <command>` | `python deploy/ops.py <command>` ([deploy/README.md](deploy/README.md)) |
+| `aws-local [up\|verify\|down]` | `python deploy/local/rehearse.py <command>`: the Terraform stack on an AWS emulator, the stream task, traffic and checks, without an AWS account ([deploy/README.md](deploy/README.md)) |
 | `down` | `docker compose --profile serve --profile stream --profile job down` (files on disk are kept) |
 
 ## 13. Services and ports
@@ -817,6 +818,9 @@ a profile that enforces the ±15 min window.
   recall and precision at BLOCK with it.
 - **On AWS** the same image runs on Fargate against real Kinesis, with Firehose archiving decisions to S3 and SNS /
   CloudWatch alarms: [deploy/README.md](deploy/README.md).
+- **AWS rehearsal without an account.** `.\argus.ps1 aws-local up` applies that Terraform stack to an AWS emulator on
+  this PC, runs the stream as its Fargate task would, sends traffic and checks the result in about 5 minutes
+  ([deploy/README.md, section 4](deploy/README.md#4-rehearse-the-aws-stack-locally-optional-no-aws-account)).
 
 ## 17. Logs: where to look
 
@@ -854,7 +858,7 @@ a profile that enforces the ±15 min window.
 | Platform settings (URLs, tokens, image names) | `ARGUS_*` env vars on the `platform` service (see `platform/app/core/config.py`) | `docker compose up -d platform` |
 | Acceptance targets, strict backtest | `acceptance:` / `label_maturity:` in `training/configs/base.yaml` | next run |
 | Stream traffic, fraud patterns, actions | `stream/argus_stream/` (`generator.py`, `processor.py`, `__init__.py`); env in `docker-compose.yml` → `stream` | `docker compose --profile stream up -d --build stream` |
-| GPU VM / AWS deployment | `deploy/hyperstack/*.sh`, `deploy/terraform/*.tf`, `deploy/ops.py` | [deploy/README.md](deploy/README.md) |
+| GPU VM / AWS deployment | `deploy/hyperstack/*.sh`, `deploy/terraform/*.tf`, `deploy/ops.py` | [deploy/README.md](deploy/README.md); after a Terraform or stream change: `.\argus.ps1 aws-local up` (section 4 there) |
 
 ## 19. Tests
 
@@ -868,7 +872,7 @@ a profile that enforces the ±15 min window.
 | frontend (vitest, 27 tests) | `node` build stage | formatters, null-safe ratios, overrides diff, API client errors, UI states, `Button asChild`, feature registry, a page bundle missing after a redeploy (reload once, never a blank page) |
 | training logic (pytest, 24 tests) | `argus-training` (`trainer`) | thresholds for recall / precision targets, curves, saved calibrators as served, review capacity, per-code F1, prompt formats, label maturity, every profile resolves, the acceptance checklist and report, the measured-run rule, stale LLM-scorer cleanup, registry status, tied thresholds |
 | stream (pytest, 44 tests) | `argus-stream:test` | CRD-valid synthetic and holdout events, fraud patterns, fail-open + circuit breaker, invalid requests, actions, idempotent store and live accuracy, shadow scoring and its back-off, store migration, API control key on reads and writes, a rejected token held for REVIEW, publish-before-store with checkpoints and resume, a recreated stream never inheriting old checkpoints, Kinesis round trip (moto) |
-| deploy (pytest, 31 tests) | `python:3.12` | `ops.py`: Terraform settings carried to CI without secrets, the allow-list, the Fraud Model API check (token accepted / rejected / no model, against a local HTTP stub), empty CI variables, `.env` last-value-wins and PowerShell appends, the demo-model guard, the operations agent and its catalogue, and the GPU VM scripts themselves run under bash with stubbed docker / tmux / ssh (profile choice, apply, serve, pipeline, remote) |
+| deploy (pytest, 42 tests) | `python:3.12` | `ops.py`: Terraform settings carried to CI without secrets, the allow-list, the Fraud Model API check (token accepted / rejected / no model, against a local HTTP stub), empty CI variables, `.env` last-value-wins and PowerShell appends, the demo-model guard, the operations agent and its catalogue, the GPU VM scripts themselves run under bash with stubbed docker / tmux / ssh (profile choice, apply, serve, pipeline, remote), and the local AWS rehearsal's static checks (the stream's AWS calls vs the task role in `ecs.tf`, an emulator endpoint for every Terraform resource type) |
 
 CI (`.github/workflows/ci.yml`) runs all of them on every push and pull request, plus `terraform validate`, shellcheck
 of the GPU VM scripts and the compose file.

@@ -15,6 +15,7 @@
     .\argus.ps1 stream [stop]          Kinesis emulator + stream scorer :8003 (UI: Live stream); needs serve
     .\argus.ps1 prefetch <profile>     download every model a profile uses (checks gated access first)
     .\argus.ps1 aws <command>          AWS deployment: check | up | deploy | status | dataset | down | audit
+    .\argus.ps1 aws-local [up|verify|down]  rehearse the AWS stack on this PC (no account; deploy/README.md)
     .\argus.ps1 logs [service]         follow logs (platform, frontend, mlflow, scoring, explainer, stream, or a job id)
     .\argus.ps1 status                 containers, images and the latest platform jobs
     .\argus.ps1 test                   platform, training, scoring, stream pytest + frontend vitest, all in containers
@@ -175,6 +176,10 @@ switch ($Action) {
   "aws" {
     if (-not $Arg1) { throw "usage: .\argus.ps1 aws check|up|deploy|status|dataset|down|audit" }
     Run ("python deploy/ops.py " + ((@($Arg1, $Arg2) + $Rest | Where-Object { $_ }) -join " "))
+  }
+  "aws-local" {
+    $cmd = if ($Arg1) { $Arg1 } else { "up" }
+    Run ("python deploy/local/rehearse.py " + ((@($cmd, $Arg2) + $Rest | Where-Object { $_ }) -join " "))
   }
   "logs" {
     if (-not $Arg1) { Run "docker compose logs -f --tail 200" }

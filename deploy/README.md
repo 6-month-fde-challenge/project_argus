@@ -23,10 +23,16 @@ real infrastructure:
 
 ### Contents
 
-[1. What runs where](#1-what-runs-where) · [2. Isolation](#2-isolation-what-this-touches-in-the-aws-account) ·
-[3. Configuration checklist](#3-configuration-checklist) · [4. Runbook](#4-runbook-in-this-order) ·
-[5. Script reference](#5-script-reference) · [6. Data, audit and monitoring](#6-data-audit-and-monitoring) ·
-[7. Security](#7-security) · [8. Cost](#8-cost) · [9. Troubleshooting](#9-troubleshooting)
+| Part | Sections |
+|---|---|
+| Understand it | [1. What runs where](#1-what-runs-where) · [2. Isolation](#2-isolation-what-this-touches-in-the-aws-account) |
+| Prepare | [3. Configuration checklist](#3-configuration-checklist) · [4. Rehearse locally (optional)](#4-rehearse-the-aws-stack-locally-optional-no-aws-account) |
+| Deploy and operate | [5. Runbook](#5-runbook-in-this-order) · [6. Script reference](#6-script-reference) · [7. Data, audit and monitoring](#7-data-audit-and-monitoring) |
+| Reference | [8. Security](#8-security) · [9. Cost](#9-cost) · [10. Troubleshooting](#10-troubleshooting) |
+
+**The shortest path:** [3](#3-configuration-checklist) (settings) → [4](#4-rehearse-the-aws-stack-locally-optional-no-aws-account)
+(optional rehearsal on your PC) → [5](#5-runbook-in-this-order), Steps 1–5 (VM, then AWS) → tick the
+[first-deployment checklist](#first-real-deployment-what-only-the-vm-and-aws-can-confirm).
 
 ---
 
@@ -90,7 +96,8 @@ Terraform creates the rest: the Kinesis streams, Firehose, buckets, the stream c
 ### First real deployment: what only the VM and AWS can confirm
 
 Everything else is covered by the test suites and CI (including the GPU VM scripts, run under bash with stubbed
-tools). These are the facts of the real environment; tick them once:
+tools) and by the local AWS rehearsal ([section 4](#4-rehearse-the-aws-stack-locally-optional-no-aws-account)).
+These are the facts of the real environment; tick them once:
 
 | # | Check | Why |
 |---|---|---|
@@ -102,8 +109,114 @@ tools). These are the facts of the real environment; tick them once:
 | 6 | `python deploy/ops.py check` ends with "ready to deploy" from your PC | tools, AWS identity, the API's token **and serving mode**, isolation |
 | 7 | Confirm the SNS e-mail subscription AWS sends to `TF_VAR_alert_email` | alarms (fail-open, demo-model-serving, latency, ...) only arrive after the confirmation |
 | 8 | For the UI's AWS page only: `ARGUS_GITHUB_TOKEN` (fine-grained, this repository: Actions, Variables, Secrets read/write) | deploy / destroy from the UI run the repository's workflows |
+| 9 | After `ops.py up` and a few minutes of traffic: the Live stream page shows decisions; the CloudWatch dashboard `argus-prod` has data; no alarm is in ALARM; `s3://argus-prod-audit-*/decisions/` has objects | the parts the local rehearsal cannot emulate: Fargate, the load balancer, IAM enforcement, Firehose delivery, alarms and dashboard |
 
-## 4. Runbook (in this order)
+## 4. Rehearse the AWS stack locally (optional, no AWS account)
+
+Runs the real Terraform stack against an AWS emulator on your PC, starts the stream the way its Fargate task would
+start, sends traffic through it and checks the result. Use it before the first `ops.py up`, and after changing
+`deploy/terraform` or the AWS calls in `stream/`. It costs nothing and touches no AWS account.
+
+### 4.1 Before you start
+
+| # | Requirement | How |
+|---|---|---|
+| 1 | Docker is running | Docker Desktop (Windows) or the Docker engine (VM) |
+| 2 | The stream image exists | `docker compose --profile stream build stream` |
+| 3 | A run is served (needed for every check to pass) | `.\argus.ps1 serve <run>` (VM: `bash deploy/hyperstack/serve.sh <run>`) |
+| 4 | Ports 4599 and 8013 are free on 127.0.0.1 | used by the emulator and the rehearsal's stream task |
+
+The first run downloads `motoserver/moto:5.2.5`, `hashicorp/terraform:1.14.0` and the Terraform AWS provider (cached
+in the Docker volume `argus-tf-plugins`, so later runs are faster).
+
+### 4.2 Run it
+
+| Command | Does | Time |
+|---|---|---|
+| `.\argus.ps1 aws-local up` | build the rehearsal and run every check | about 5 min |
+| `.\argus.ps1 aws-local verify` | run the checks again (the rehearsal keeps running after `up`) | under 1 min |
+| `.\argus.ps1 aws-local down` | remove everything the rehearsal created | seconds |
+
+The same three ways as everything else:
+
+- **PowerShell:** `.\argus.ps1 aws-local up|verify|down`.
+- **Python, any OS:** `python deploy/local/rehearse.py up|verify|down`. Use `python3` on the VM.
+- **UI:** Operations → *Rehearse the AWS stack locally*, then choose `up`, `verify` or `down`.
+
+### 4.3 What `up` does
+
+1. **Emulator.** Starts [Moto](https://github.com/getmoto/moto), an open-source AWS emulator, as the container
+   `argus-aws-local`, reachable as `aws` on the compose network.
+2. **Terraform.** Copies `deploy/terraform` and `deploy/local/moto_override.tf` into the Docker volume
+   `argus-aws-local`, then runs `init`, `plan` and `apply` there.
+   - The override sends every AWS endpoint to the emulator and keeps the Terraform state inside the volume.
+   - `deploy/terraform` and the repository are not modified.
+   - Terraform warns that `-target` is in effect. That is expected: it is how the CloudWatch alarms and the dashboard
+     are left out, because the emulator cannot create them.
+3. **Stream task.** Runs `argus-stream:latest` (the same Dockerfile as the image pushed to ECR) as
+   `argus-aws-stream`. It gets the environment of the ECS task definition Terraform created, and the secrets read
+   from SSM, as ECS would inject them. It calls the Fraud Model API at `http://scoring:8080`.
+4. **Traffic.** About 75 seconds of it, so the CloudWatch metrics are flushed at least once:
+   - the labelled holdout, uploaded to the S3 data bucket and replayed from there;
+   - synthetic payments;
+   - one attack wave (card testing);
+   - one payment from a blocklisted device, so a BLOCK goes out on SNS.
+5. **Checks.** Prints PASS, FAIL or n/a for each check, and exits with 1 if any check fails.
+
+### 4.4 The checks
+
+| Check | Passes when |
+|---|---|
+| Terraform applied the whole stack | every planned resource exists, except the CloudWatch alarms and dashboard |
+| Kinesis transactions stream / decisions stream | both streams are `ACTIVE` |
+| Firehose: decisions stream → S3 audit bucket | the delivery stream reads the decisions stream and writes to the audit bucket |
+| Secrets from SSM | the scoring token and control key (≥ 32 characters) resolve from SSM |
+| Stream task consumes Kinesis | the task is connected and has consumed transactions |
+| Stream errors / dead letters | 0 errors and 0 dead letters |
+| Fraud Model API reached from the task | the API answered `ok` (n/a if the stream reports no API status) |
+| Holdout replay from the S3 data bucket | holdout transactions were decided (n/a if the task does not replay the holdout) |
+| Decisions published to the decisions stream | at least one decision per consumed transaction |
+| BLOCK alert published to SNS | the blocklisted payment's `BLOCK_AND_ALERT` reached a test queue subscribed to the actions topic |
+| Stream metrics in CloudWatch | `Transactions`, `FailOpen` and `DemoModelServing` were published |
+| Every stream alarm watches a metric the stream publishes | each alarm Terraform defines on the stream's namespace names a metric the stream really sends |
+| DemoModelServing reflects what the API serves | the metric has datapoints (1 = a demo setup is behind the traffic, 0 = production) |
+| Task role allows every AWS call the stream makes | the task role's policy allows each call the stream code makes |
+
+### 4.5 What the emulator cannot show
+
+Confirm these on the first real deployment ([checklist row 9](#first-real-deployment-what-only-the-vm-and-aws-can-confirm)):
+
+| Not emulated | Checked locally instead |
+|---|---|
+| IAM *enforcement* (Moto accepts every call) | the task role's policy lists every call the stream makes |
+| VPC networking, security groups, the load balancer | – |
+| Fargate itself (scheduling, health checks, rollback) | the stream runs as a container, with the task definition's environment |
+| Firehose delivery into S3 | the delivery stream's source and destination |
+| CloudWatch alarms and dashboard (Moto does not support the CloudWatch protocol the Terraform AWS provider uses) | every alarm's metric against the metrics the stream publishes |
+
+### 4.6 In CI
+
+Part of the rehearsal needs no Docker, so it runs on every push (`deploy/tests/test_rehearse.py`). Each of these
+fails the build:
+
+- the stream calls an AWS API that the rehearsal's list or the task role in `ecs.tf` does not cover;
+- a Terraform resource type has no emulator endpoint in `moto_override.tf`, so a rehearsal would call real AWS;
+- the Operations action accepts anything other than `up`, `verify` or `down`.
+
+### 4.7 What it leaves running, and cleanup
+
+After `up`, the rehearsal keeps running until `down`, so you can look around:
+
+| Item | What it is | Look at |
+|---|---|---|
+| container `argus-aws-local` | the AWS emulator | http://127.0.0.1:4599/moto-api/ |
+| container `argus-aws-stream` | the stream task | http://127.0.0.1:8013/live/docs |
+| volume `argus-aws-local` | Terraform working copy, state and plan | – |
+| volume `argus-tf-plugins` | Terraform provider cache (kept by `down`) | `docker volume rm argus-tf-plugins` to free it |
+
+`down` removes both containers and the `argus-aws-local` volume. Nothing is written to the repository at any point.
+
+## 5. Runbook (in this order)
 
 ### Step 1: the GPU VM
 
@@ -239,7 +352,7 @@ On the VM: `bash deploy/hyperstack/serve.sh stop`, `tmux kill-server`, then **hi
 
 ---
 
-## 5. Script reference
+## 6. Script reference
 
 ### GPU VM: `deploy/hyperstack/`
 
@@ -288,7 +401,15 @@ The agent needs `sudo` without a password for the steps that install packages (t
 | `monitoring.tf` | log groups, SNS alerts + actions, alarms, dashboard |
 | `variables.tf` / `outputs.tf` | every knob (defaults documented) / URLs and names `ops.py` prints |
 
-## 6. Data, audit and monitoring
+### Local rehearsal: `deploy/local/` (also `.\argus.ps1 aws-local <command>`; [section 4](#4-rehearse-the-aws-stack-locally-optional-no-aws-account))
+
+| File | Runs on | Does |
+|---|---|---|
+| `rehearse.py up\|verify\|down` | your PC or the VM (standard library + the docker CLI) | starts the emulator, applies Terraform, runs the stream task, sends traffic, runs the checks; `down` removes it all |
+| `inside.py` | inside the stream image, started by `rehearse.py` | talks to the emulator with boto3: reads the task definition and SSM secrets, uploads the holdout, sends the blocklisted payment, runs the checks |
+| `moto_override.tf` | copied next to the Terraform copy in the volume | sends every AWS endpoint to the emulator; keeps the state in the volume |
+
+## 7. Data, audit and monitoring
 
 | Where | What | Kept |
 |---|---|---|
@@ -310,7 +431,7 @@ The agent needs `sudo` without a password for the steps that install packages (t
 | `kinesis-lag` | the scorer is more than 60 s behind |
 | `task-cpu` / `task-memory` / `unhealthy` | the Fargate task is saturated or fails its health check |
 
-## 7. Security
+## 8. Security
 
 - **Tokens.** The VM never runs with the demo tokens from git: `setup_vm.sh` generates `ARGUS_SCORING_TOKEN` /
   `ARGUS_SCORING_ADMIN_TOKEN`, which the scoring service and the platform both read. On AWS the token lives in SSM.
@@ -331,7 +452,7 @@ The agent needs `sudo` without a password for the steps that install packages (t
   15-minute service JWTs inside VKPayments' VPC, with the Fraud Model API on EKS (README section 22), and S3 Object
   Lock in compliance mode on the audit bucket.
 
-## 8. Cost
+## 9. Cost
 
 | Item | Cost (approximate, if left running) |
 |---|---|
@@ -344,7 +465,7 @@ The agent needs `sudo` without a password for the steps that install packages (t
 
 `ops.py down` and hibernating the VM stop everything.
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
@@ -361,3 +482,8 @@ The agent needs `sudo` without a password for the steps that install packages (t
 | `setup_vm.sh`: containers cannot see the GPU | the image's driver is too old or the toolkit failed: pick a newer NVIDIA image and re-run |
 | `deploy.yml` deploy job skipped | `ops.py up` has not run yet (it sets `AWS_ROLE_ARN`) |
 | A run is `interrupted` after the VM was hibernated | `train.sh <profile> --stages <remaining>` with the same run name (`--set run_name=...`) |
+| Rehearsal: `argus-stream:latest is missing` | `docker compose --profile stream build stream`, then `aws-local up` again |
+| Rehearsal: FAIL *Fraud Model API reached from the task* (every decision `FAIL_OPEN`) | no run is served: `.\argus.ps1 serve <run>`, then `aws-local up` again |
+| Rehearsal: `port is already allocated` (4599 or 8013) | another program uses the port (`up` already replaces an earlier rehearsal): stop it, then `aws-local up` |
+| Rehearsal: FAIL *Task role allows every AWS call* | the stream makes a call the task role in `deploy/terraform/ecs.tf` does not allow: add the action there (and to `CALLS_MADE` in `deploy/local/inside.py`) |
+| Rehearsal: FAIL *Terraform applied the whole stack* | read the `terraform apply` error above the checks; a new resource type may need its endpoint in `deploy/local/moto_override.tf` (CI says which) |

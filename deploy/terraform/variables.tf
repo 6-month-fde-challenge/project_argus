@@ -40,7 +40,7 @@ variable "scoring_port" {
 }
 
 variable "scoring_scheme" {
-  description = "http, or https once a TLS proxy with a certificate fronts the Fraud Model API (deploy/README.md section 7)"
+  description = "http, or https once a TLS proxy with a certificate fronts the Fraud Model API (deploy/README.md section 8, Security)"
   type        = string
   default     = "http"
   validation {

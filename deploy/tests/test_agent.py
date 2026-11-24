@@ -31,7 +31,7 @@ def real_actions():
 
 # ------------------------------------------------------------------ catalogue
 def test_every_action_of_the_catalogue_is_well_formed():
-    known_types = {"run", "runs", "profile", "vm_profile", "serving_config", "int", "bool", "services"}
+    known_types = {"run", "runs", "profile", "vm_profile", "serving_config", "int", "bool", "services", "choice"}
     for name, a in real_actions().items():
         assert a["label"] and a["group"] and a["description"], name
         assert a.get("approval") in (None, "production"), name

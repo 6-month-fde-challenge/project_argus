@@ -90,6 +90,13 @@
       "linux": ["docker", "compose", "--profile", "stream", "stop", "stream", "kinesis"],
       "windows": ["argus.ps1", "stream", "stop"]
     },
+    "aws_local": {
+      "label": "Rehearse the AWS stack locally", "group": "Stream", "approval": null, "timeout_min": 30,
+      "description": "Applies the real Terraform stack to an AWS emulator (Moto, no account), runs the stream task from its task definition, pushes traffic and checks the result (deploy/local/rehearse.py). 'down' removes it.",
+      "params": {"command": {"type": "choice", "required": true, "label": "command", "options": ["up", "verify", "down"], "default": "up"}},
+      "linux": ["python3", "deploy/local/rehearse.py", "{command}"],
+      "windows": ["argus.ps1", "aws-local", "{command}"]
+    },
     "sync_data": {
       "label": "Sync the dataset", "group": "Data and models", "approval": null, "timeout_min": 60,
       "description": "Downloads dataset changes from Supabase (training files and the feature / label tables).",

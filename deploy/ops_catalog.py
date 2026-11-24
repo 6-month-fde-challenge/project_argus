@@ -70,7 +70,10 @@ def _check(name: str, spec: dict, value, repo: Path):
         return items
     if not isinstance(value, str):
         raise ActionError(f"{name}: text expected")
-    if t == "run":
+    if t == "choice":
+        if value not in spec["options"]:
+            raise ActionError(f"{name}: one of {spec['options']}")
+    elif t == "run":
         if not run_exists(repo, value):
             raise ActionError(f"{name}: no trained run '{value}' in training/outputs")
     elif t == "profile":

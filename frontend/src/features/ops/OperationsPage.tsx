@@ -47,6 +47,8 @@ function ParamInput({ p, value, onChange, cat }: { p: OpsParam; value: unknown; 
       return list(cat.runs);
     case "services":
       return list(p.options ?? []);
+    case "choice":
+      return <NativeSelect value={String(value ?? "")} onChange={(e) => onChange(e.target.value)}>{(p.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}</NativeSelect>;
     case "profile":
       return <NativeSelect value={String(value ?? "")} onChange={(e) => onChange(e.target.value)}><option value="">choose…</option>{cat.profiles.map((r) => <option key={r} value={r}>{r}</option>)}</NativeSelect>;
     case "vm_profile":
