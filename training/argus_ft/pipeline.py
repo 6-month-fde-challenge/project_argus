@@ -30,7 +30,7 @@ from .context import Ctx
 from .events import EventLog
 from .runs import drop_llm_scorer, seed_from
 from .stages import LADDER
-from .supabase_data import fetch_tables, sync
+from .supabase_data import fetch_tables, have_dataset, sync
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,7 +106,9 @@ def main() -> None:
 
     # 0) data: training files from the storage bucket, feature/label tables from Postgres
     t0 = time.time()
-    if not args.no_sync:
+    if args.no_sync and not have_dataset(cfg.data_dir, cfg.db_dir):
+        print("    no local dataset yet (a fresh machine): downloading it once despite --no-sync")
+    if not args.no_sync or not have_dataset(cfg.data_dir, cfg.db_dir):
         sync(cfg.data_dir)
         fetch_tables(cfg.db_dir)
 

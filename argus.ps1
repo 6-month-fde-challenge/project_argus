@@ -8,6 +8,7 @@
     .\argus.ps1 unserve                stop scoring + explainer (frees the GPU for training)
     .\argus.ps1 apply <service>...     recreate services after a settings change (.env), like the UI's Settings page
     .\argus.ps1 agent [start|stop|status]  the operations agent: lets the UI's Operations / Settings pages act on this PC
+    .\argus.ps1 sync                   download the dataset from Supabase into training/data (later: only changes)
     .\argus.ps1 train <profile> [run]  a pipeline run from the CLI (smoke, local_demo, demo_hybrid, ...)
     .\argus.ps1 report                 report.md per demo run + outputs/comparison.md (hybrid vs LLM scorer)
     .\argus.ps1 demo                   CRD / LLD scenarios against the running scoring API -> outputs/<run>/api/
@@ -144,6 +145,10 @@ switch ($Action) {
     }
   }
   "unserve" { Run "docker compose --profile serve stop scoring explainer" }
+  "sync" {
+    # the dataset from Supabase into training/data (first time: everything; later: only changes)
+    Run "docker compose run --rm --no-deps trainer python -m argus_ft.supabase_data"
+  }
   "train" {
     if (-not $Arg1) { throw "usage: .\argus.ps1 train <profile> [run_name]" }
     $set = if ($Arg2) { " --set run_name=$Arg2" } else { "" }

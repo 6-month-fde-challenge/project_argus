@@ -123,13 +123,24 @@ def sync(out_dir: str | Path = "data/raw", prefixes=DEFAULT_PREFIXES, force: boo
     return out_dir
 
 
+def have_dataset(data_dir: str | Path = "data/raw", db_dir: str | Path = "data/db") -> bool:
+    """True once a sync has completed here: the bucket's manifest and every table snapshot are on disk."""
+    return (Path(data_dir) / "manifest.json").is_file() and all(
+        (Path(db_dir) / f"{t}.parquet").is_file() for t in TABLES)
+
+
 def main() -> None:
+    """python -m argus_ft.supabase_data: the whole dataset (bucket files + table snapshots); only changes after the
+    first time. Same as `.\\argus.ps1 sync` and the UI's Operations -> Sync the dataset."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="data/raw")
+    ap.add_argument("--db", default="data/db", help="table snapshots folder ('' = skip the tables)")
     ap.add_argument("--prefix", action="append", help="bucket prefix to fetch (repeatable); '' = everything")
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
     sync(args.out, tuple(args.prefix) if args.prefix is not None else DEFAULT_PREFIXES, args.force)
+    if args.db:
+        fetch_tables(args.db)
 
 
 if __name__ == "__main__":

@@ -101,10 +101,8 @@
       "label": "Sync the dataset", "group": "Data and models", "approval": null, "timeout_min": 60,
       "description": "Downloads dataset changes from Supabase (training files and the feature / label tables).",
       "params": {},
-      "linux": ["docker", "compose", "run", "--rm", "--no-deps", "-T", "trainer", "python", "-c",
-                "from argus_ft.supabase_data import fetch_tables, sync; sync('data/raw'); fetch_tables('data/db')"],
-      "windows": ["docker", "compose", "run", "--rm", "--no-deps", "-T", "trainer", "python", "-c",
-                  "from argus_ft.supabase_data import fetch_tables, sync; sync('data/raw'); fetch_tables('data/db')"]
+      "linux": ["docker", "compose", "run", "--rm", "--no-deps", "-T", "trainer", "python", "-m", "argus_ft.supabase_data"],
+      "windows": ["argus.ps1", "sync"]
     },
     "prefetch": {
       "label": "Download a profile's models", "group": "Data and models", "approval": null, "timeout_min": null,

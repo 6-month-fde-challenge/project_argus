@@ -1,7 +1,7 @@
 # ARGUS deployment: GPU VM (Hyperstack) + AWS (ap-south-1)
 
-The main [README](../README.md) runs everything on one machine with Docker. This folder takes the same solution to
-real infrastructure:
+The main [README](../README.md) runs everything on one machine with Docker ([SETUP.md](../SETUP.md): from scratch,
+step by step). This folder takes the same solution to real infrastructure:
 
 - **a GPU VM** (Hyperstack, or any Ubuntu host with an NVIDIA GPU) trains the ladder and serves the Fraud Model API;
 - **AWS ap-south-1** runs the real-time path around it: Amazon Kinesis → stream scorer → decision → action, with an
