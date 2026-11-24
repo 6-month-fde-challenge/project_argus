@@ -4,13 +4,14 @@ import { CheckCircle2, Rocket, Send, ShieldAlert, ShieldCheck, ShieldX, Zap } fr
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { api, errorMessage } from "@/shared/api/client";
-import { keys } from "@/shared/api/queries";
-import type { SampleRequest, ScoreResponse } from "@/shared/api/types";
+import { keys, useServices } from "@/shared/api/queries";
+import type { Approval, SampleRequest, ScoreResponse } from "@/shared/api/types";
 import { baseOption, EChart } from "@/shared/charts/EChart";
 import { DECISION_POLICY, REASONS } from "@/shared/lib/reasons";
 import { cn, fmt } from "@/shared/lib/utils";
 import { Badge, Button, Card, CardBody, CardHeader, EmptyState, ErrorState, PageHeader, StatusBadge } from "@/shared/ui/core";
 import { CodeView, JsonView } from "@/shared/ui/content";
+import { ApprovalFields, approvalReady, emptyApproval, isApprovalError } from "@/shared/ui/governance";
 import { Dialog, Tip } from "@/shared/ui/overlays";
 
 interface Deployments {
@@ -75,11 +76,17 @@ function ResponseCard({ status, body }: { status: number; body: any }) {
 function DeploymentsCard() {
   const qc = useQueryClient();
   const { data, error } = useQuery({ queryKey: keys.scoringModels, queryFn: () => api.get<Deployments>("/scoring/models"), refetchInterval: 10000, retry: false });
+  const { data: svc } = useServices();
+  const production = svc?.serving_mode === "production";
+  const [pending, setPending] = useState<string | null>(null);   // run waiting for two-person approval
+  const [approval, setApproval] = useState<Approval>(emptyApproval);
   const activate = useMutation({
-    mutationFn: (run: string) => api.post(`/scoring/models/${run}/activate`),
-    onSuccess: (_, run) => { toast.success(`Deployed ${run}`); qc.invalidateQueries({ queryKey: keys.scoringModels }); },
-    onError: (e) => toast.error(errorMessage(e)),
+    mutationFn: ({ run, withApproval }: { run: string; withApproval?: boolean }) =>
+      api.post(`/scoring/models/${run}/activate`, withApproval ? { approval } : {}),
+    onSuccess: (_, v) => { toast.success(`Deployed ${v.run}`); setPending(null); setApproval(emptyApproval); qc.invalidateQueries({ queryKey: keys.scoringModels }); qc.invalidateQueries({ queryKey: keys.services }); },
+    onError: (e, v) => { if (isApprovalError(e)) setPending(v.run); else toast.error(errorMessage(e)); },
   });
+  const start = (run: string) => (production ? setPending(run) : activate.mutate({ run }));
   return (
     <Card><CardHeader title="Deployments" subtitle="Activate a trained run's scorer (LLD 4.4 rollback); switching is instant once loaded" icon={<Rocket className="h-4 w-4" />} />
       <CardBody className="space-y-2">
@@ -90,10 +97,19 @@ function DeploymentsCard() {
             <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium">{m.run}</div><div className="text-[11px] text-muted">{m.scorer === "llm" ? "FP8 LLM scorer" : "XGBoost (HYBRID)"}{m.loaded && " · warm"}{m.shadow && " · shadow"}</div></div>
             {m.forced && <Tip content={`Not a measured run: ${m.forced_reason ?? "the week-8 branch was forced"}. A demo, never promotable: a production profile refuses to activate it.`}><span><Badge tone="warn">demo · forced</Badge></span></Tip>}
             {m.active ? <Badge tone="ok"><CheckCircle2 className="h-3 w-3" /> live</Badge>
-              : <Button size="sm" onClick={() => activate.mutate(m.run)} loading={activate.isPending && activate.variables === m.run}>Activate</Button>}
+              : <Button size="sm" onClick={() => start(m.run)} loading={activate.isPending && activate.variables?.run === m.run}>Activate</Button>}
           </div>
         ))}
-      </CardBody></Card>
+      </CardBody>
+      {pending && (
+        <Dialog open onOpenChange={(o) => !o && setPending(null)} title={`Activate ${pending}`} description="Production mode: switching the live model changes what every payment meets. The API refuses demo runs here regardless.">
+          <div className="space-y-3">
+            <ApprovalFields value={approval} onChange={setApproval} />
+            <div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => setPending(null)}>Cancel</Button>
+              <Button variant="primary" onClick={() => activate.mutate({ run: pending, withApproval: true })} loading={activate.isPending} disabled={!approvalReady(approval)}>Activate</Button></div>
+          </div>
+        </Dialog>)}
+    </Card>
   );
 }
 

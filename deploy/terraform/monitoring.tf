@@ -27,6 +27,8 @@ locals {
   alarms = {
     "scoring-unreachable" = { desc = "Transactions decided by the fail-open rule: the Fraud Model API did not answer (FR-API-01)",
     ns = local.cw_namespace, metric = "FailOpen", stat = "Sum", dims = local.stream_dims, period = 300, n = 1, threshold = 0 }
+    "demo-model-serving" = { desc = "The Fraud Model API behind live traffic serves a demo setup (demo mode or a demo / forced run): serve a measured run with PROFILE=prod",
+    ns = local.cw_namespace, metric = "DemoModelServing", stat = "Maximum", dims = local.stream_dims, period = 60, n = 2, threshold = 0 }
     "scoring-auth" = { desc = "The Fraud Model API rejected the stream's token (401): payments are held for REVIEW until ARGUS_SCORING_TOKEN matches",
     ns = local.cw_namespace, metric = "AuthErrors", stat = "Sum", dims = local.stream_dims, period = 300, n = 1, threshold = 0 }
     "block-spike" = { desc = "Unusually many BLOCK decisions (attack wave, or a bad threshold change)",
@@ -87,7 +89,7 @@ resource "aws_cloudwatch_dashboard" "this" {
     markdown = "# ARGUS ${var.environment}\nKinesis → stream scorer (Fargate) → Fraud Model API on the GPU VM (${local.scoring_url == "" ? "not set" : local.scoring_url}) → decision → action → decisions stream → S3 audit · API: http://${aws_lb.this.dns_name}/live/docs" } },
     { type = "metric", x = 0, y = 2, width = 8, height = 6, properties = {
       title = "Transactions and decisions / min", region = var.region, stat = "Sum", period = 60, view = "timeSeries",
-    metrics = [for m in ["Transactions", "Allowed", "Reviewed", "Blocked", "FailOpen", "AuthErrors"] : [local.cw_namespace, m, "Service", "stream"]] } },
+    metrics = [for m in ["Transactions", "Allowed", "Reviewed", "Blocked", "FailOpen", "AuthErrors", "DemoModelServing"] : [local.cw_namespace, m, "Service", "stream"]] } },
     { type = "metric", x = 8, y = 2, width = 8, height = 6, properties = {
       title   = "Fraud Model API latency (ms, as seen by the stream)", region = var.region, period = 60, view = "timeSeries",
       metrics = [for s in ["p50", "p95", "p99"] : [local.cw_namespace, "ApiLatency", "Service", "stream", { stat = s }]],

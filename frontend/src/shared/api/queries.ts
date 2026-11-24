@@ -32,6 +32,12 @@ export const keys = {
   documents: ["docs", "documents"] as const,
   document: (name: string) => ["docs", "documents", name] as const,
   diagrams: ["docs", "diagrams"] as const,
+  settings: ["settings"] as const,
+  changes: (kind?: string) => ["settings", "changes", kind ?? "all"] as const,
+  opsCatalog: ["ops", "catalog"] as const,
+  opsActions: ["ops", "actions"] as const,
+  opsAction: (id: string) => ["ops", "actions", id] as const,
+  aws: ["aws"] as const,
 };
 
 export const useRuns = () =>

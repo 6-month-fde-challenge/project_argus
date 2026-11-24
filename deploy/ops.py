@@ -150,9 +150,16 @@ STACK_TF_VARS = {"region", "project", "environment"}   # set by Ctx from AWS_REG
 
 def saved_tf_vars() -> dict[str, str]:
     """Every non-secret TF_VAR_* of this machine, so CI deploys with exactly the same settings (transaction_time,
-    certificate_arn, events_per_sec, ...) instead of silently falling back to the defaults."""
-    return {k[len("TF_VAR_"):]: v for k, v in os.environ.items()
-            if k.startswith("TF_VAR_") and v and k[len("TF_VAR_"):] not in SECRET_TF_VARS | STACK_TF_VARS}
+    certificate_arn, events_per_sec, ...) instead of silently falling back to the defaults.
+    Names are compared lower-case: Windows reports environment variables upper-case (TF_VAR_SCORING_TOKEN), and a
+    secret must never slip into the TF_VARS variable because of its spelling (the project's variables are lower-case)."""
+    out = {}
+    for k, v in os.environ.items():
+        if k.upper().startswith("TF_VAR_") and v:
+            name = k[len("TF_VAR_"):].lower()
+            if name not in SECRET_TF_VARS | STACK_TF_VARS:
+                out[name] = v
+    return out
 
 
 def restore_tf_vars() -> None:
@@ -184,7 +191,26 @@ def check_scoring(host: str, token: str) -> tuple[bool, str]:
         return False, "the Fraud Model API rejects TF_VAR_scoring_token (copy ARGUS_SCORING_TOKEN from the VM's .env)"
     if health.get("scorer") != "ok":
         return False, f"the Fraud Model API has no active model ({health.get('status')}): serve.sh <run> on the VM"
-    return True, f"Fraud Model API on {host}: {health.get('model_version')} ({health.get('active_run')}), token accepted"
+    if why := demo_serving(health):
+        return False, why
+    return True, (f"Fraud Model API on {host}: {health.get('model_version')} ({health.get('active_run')}), token "
+                  f"accepted, {health.get('serving_mode', 'unknown')} mode")
+
+
+def demo_serving(health: dict) -> str | None:
+    """Why live AWS traffic would meet a demo model (None when it would not, or when --allow-demo says go ahead).
+
+    Production means the API runs a profile that refuses demo runs (api.allow_forced_runs: false) AND its active run
+    is a measured one. A demo setup (PROFILE=demo, local_demo.yaml) is fine on the VM, never behind real traffic."""
+    if os.getenv("ARGUS_ALLOW_DEMO") == "1":
+        return None
+    if health.get("serving_mode") != "production":
+        return (f"the Fraud Model API runs in {health.get('serving_mode', 'an unknown')} mode (demo runs allowed): "
+                "serve with PROFILE=prod (SCORING_CONFIG=configs/prod_a100.yaml), or --allow-demo to accept it")
+    if health.get("active_run_forced"):
+        return (f"the active run {health.get('active_run')} is a demo run ({health.get('active_run_forced_reason')}): "
+                "serve a measured run, or --allow-demo to accept it")
+    return None
 
 
 def check(c: Ctx) -> bool:
@@ -221,7 +247,12 @@ def check(c: Ctx) -> bool:
                     "is decided by the fail-open rule until the Fraud Model API is reachable")
     else:
         ok, msg = check_scoring(host, token)
-        good(msg) if ok else warn.append(msg)
+        if ok:
+            good(msg)
+        elif "demo" in msg and "--allow-demo" in msg:
+            bad.append(msg)  # live payments must never be scored by a demo model
+        else:
+            warn.append(msg)
     if os.getenv("GITHUB_ACTIONS") != "true" or os.getenv("TF_VAR_allowed_cidrs"):
         cidrs = allowed_cidrs()
         (warn.append if "0.0.0.0/0" in cidrs else good)(f"stream API reachable from {', '.join(cidrs)}")
@@ -394,6 +425,11 @@ def seed_dataset(c: Ctx, force: bool = False, folder: Path = HOLDOUT) -> None:
 
 def deploy(c: Ctx, tag: str, wait: bool = True) -> dict:
     preflight()
+    host, token = scoring_settings()
+    if host and token:  # never point live traffic at a demo model (check / up / CI deploy alike)
+        ok, msg = check_scoring(host, token)
+        if not ok and "--allow-demo" in msg:
+            sys.exit(f"deploy refused: {msg}")
     os.environ["TF_VAR_allowed_cidrs"] = json.dumps(allowed_cidrs())
     tf_init(c)
     log("Registry + buckets first (the image must exist before the service)")
@@ -515,11 +551,14 @@ def main(argv=None) -> None:
     s = sub.add_parser("up")
     s.add_argument("--tag")
     s.add_argument("--no-wait", action="store_true")
-    sub.add_parser("check", help="read-only: settings, the Fraud Model API and isolation before deploying")
+    s.add_argument("--allow-demo", action="store_true", help="accept a Fraud Model API that serves a demo setup")
+    s = sub.add_parser("check", help="read-only: settings, the Fraud Model API and isolation before deploying")
+    s.add_argument("--allow-demo", action="store_true", help="accept a Fraud Model API that serves a demo setup")
     sub.add_parser("bootstrap")
     s = sub.add_parser("deploy")
     s.add_argument("--tag")
     s.add_argument("--no-wait", action="store_true")
+    s.add_argument("--allow-demo", action="store_true", help="accept a Fraud Model API that serves a demo setup")
     s = sub.add_parser("dataset")
     s.add_argument("--dir", help="folder with the holdout *.parquet (default training/data/raw/.../holdout)")
     sub.add_parser("status")
@@ -529,6 +568,8 @@ def main(argv=None) -> None:
     s.add_argument("-y", "--yes", action="store_true")
     sub.add_parser("audit")
     a = p.parse_args(argv)
+    if getattr(a, "allow_demo", False):
+        os.environ["ARGUS_ALLOW_DEMO"] = "1"  # read by demo_serving(); CI sets it from the ALLOW_DEMO variable
     c = Ctx(a)
     if a.cmd == "check":
         sys.exit(0 if check(c) else 1)

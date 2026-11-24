@@ -42,13 +42,17 @@ def kinesis_client():
 
 
 def ensure_streams(client, names: list[str], shards: int = 1, wait_s: float = 60) -> None:
-    """Create any missing stream and wait until it is ACTIVE (local emulator only)."""
+    """Create any missing stream and wait until it is ACTIVE (local emulator only). Safe to call from several threads
+    at once (the scorer and the traffic producer both do at start-up): whoever loses the create race just waits."""
     for name in names:
         try:
             client.describe_stream_summary(StreamName=name)
         except client.exceptions.ResourceNotFoundException:
-            client.create_stream(StreamName=name, ShardCount=shards)
-            log.info("created Kinesis stream %s", name)
+            try:
+                client.create_stream(StreamName=name, ShardCount=shards)
+                log.info("created Kinesis stream %s", name)
+            except client.exceptions.ResourceInUseException:
+                pass  # created (or being created) by another thread or process: wait for it below
     deadline = time.time() + wait_s
     for name in names:
         while time.time() < deadline:

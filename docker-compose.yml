@@ -66,6 +66,9 @@ services:
       - ../client_docs:/workspace/client_docs:ro
       - ../day_wise/part_03/diagrams:/workspace/diagrams:ro
       - /var/run/docker.sock:/var/run/docker.sock    # launches / stops training jobs and serving containers
+      # the repository itself: Settings page (.env), profile editor (training/configs), Operations page (the action
+      # catalogue deploy/ops_actions.json; the operations agent on the host runs the actions)
+      - .:/workspace/repo
     restart: unless-stopped
 
   # ------------------------------------------------------------------ MLflow tracking + model registry

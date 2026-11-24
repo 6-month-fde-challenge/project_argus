@@ -35,7 +35,7 @@ from argus_ft.config import load_config
 from .audit import AuditLog
 from .admission import Admission
 from .auth import apply_token_env, authorised, bearer_ok
-from .runs import ForcedRunRefused
+from .runs import ForcedRunRefused, forced_reason
 from .explainer import Explainer
 from .features import FeatureStore
 from .rules import LISTS, RulesEngine
@@ -219,14 +219,20 @@ async def shadow_score(run: str, txn: TransactionIn, authorization: str | None =
 
 @app.get("/v1/health")
 async def health():
-    scorer, explainer_ok = state["models"].scorer, await state["explainer"].healthy()
+    models = state["models"]
+    scorer, explainer_ok = models.scorer, await state["explainer"].healthy()
+    # serving_mode: "production" refuses demo (forced / unmeasured) runs, "demo" serves them (api.allow_forced_runs).
+    # The AWS stream alarms and ops.py refuses to connect AWS when live traffic would meet a demo model.
+    demo_reason = await run_in_threadpool(forced_reason, Path(models.outputs_dir) / models.active) if models.active else None
     return {
         "status": "ok" if scorer and explainer_ok else ("degraded" if scorer else "down"),
         "model_version": scorer.version if scorer else None, "scorer": "ok" if scorer else "down",
-        "scorer_kind": scorer.kind if scorer else None, "active_run": state["models"].active,
+        "scorer_kind": scorer.kind if scorer else None, "active_run": models.active,
+        "serving_mode": "demo" if models.allow_forced else "production",
+        "active_run_forced": demo_reason is not None, "active_run_forced_reason": demo_reason,
         "explainer": "ok" if explainer_ok else "degraded",
         "feature_store": f"snapshot ({len(state['store'])} transactions)", **state["rules"].versions,
-        "admission": state["admission"].stats(), "shadow_run": state["models"].shadow_run,
+        "admission": state["admission"].stats(), "shadow_run": models.shadow_run,
     }
 
 

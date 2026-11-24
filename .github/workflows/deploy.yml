@@ -9,6 +9,11 @@ on:
     branches: [main]
     paths-ignore: ["**.md", "docs/**"]
   workflow_dispatch:
+    inputs:
+      allow_demo:
+        description: "Deploy even though the Fraud Model API serves a demo setup (never for live traffic)"
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-${{ vars.ENVIRONMENT || 'prod' }} # one Terraform run at a time
@@ -37,6 +42,9 @@ jobs:
       TF_VAR_allowed_cidrs: ${{ vars.ALLOWED_CIDRS }}
       TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
       TF_VARS: ${{ vars.TF_VARS }} # every other TF_VAR_* of the machine that ran `ops.py up` (JSON)
+      # deploy refuses a Fraud Model API that serves a demo setup; repository variable ALLOW_DEMO=true accepts it
+      # (or this run's allow_demo input, e.g. from the ARGUS UI's AWS page, which never leaves the variable set)
+      ARGUS_ALLOW_DEMO: ${{ (inputs.allow_demo || vars.ALLOW_DEMO == 'true') && '1' || '' }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }} # optional: seeds the holdout into S3 once
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
     steps:

@@ -23,6 +23,7 @@ case "$(env_get ARGUS_BIND)" in
   ""|127.0.0.1) ok "UI / platform / MLflow bound to 127.0.0.1 (SSH tunnel)" ;;
   *) info "ARGUS_BIND=$(env_get ARGUS_BIND): the UI and platform (no auth) listen publicly" ;;
 esac
+info "profile: ${PROFILE:-$(env_get ARGUS_PROFILE)}${PROFILE:+ (this run)}  serving: $(env_get SCORING_CONFIG)"
 [ "$(env_get ARGUS_SCORING_BIND)" = "0.0.0.0" ] && ok "Fraud Model API reachable from AWS (ARGUS_SCORING_BIND=0.0.0.0)" \
   || info "ARGUS_SCORING_BIND is not 0.0.0.0: the AWS stream cannot reach the Fraud Model API"
 info "SCORING_CONFIG=$(env_get SCORING_CONFIG)  HF_TOKEN $([ -n "$(env_get HF_TOKEN)" ] && echo set || echo unset)"
@@ -71,12 +72,14 @@ if [ "${1:-}" = "--full" ]; then
   echo "[full]"
   compose run --rm --no-deps trainer python -c "import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.cuda.get_device_name(0), 'bf16' if torch.cuda.is_bf16_supported() else 'no bf16')" \
     >/tmp/argus_torch 2>&1 && ok "training image sees the GPU: $(tail -1 /tmp/argus_torch)" || { fail "CUDA in the training image:"; tail -5 /tmp/argus_torch; }
-  for cfg in $(runs_for_profile "${PROFILE:-demo}"); do
+  CHECK_PROFILE="${PROFILE:-$(env_get ARGUS_PROFILE)}"
+  [ -n "$CHECK_PROFILE" ] || info "no profile chosen yet (ARGUS_PROFILE): model access not checked"
+  for cfg in ${CHECK_PROFILE:+$(runs_for_profile "$CHECK_PROFILE")}; do
     compose run --rm --no-deps trainer python -m argus_ft.prefetch --config "configs/$cfg.yaml" --check-only >/tmp/argus_pf 2>&1 \
       && ok "model access for $cfg" || { fail "model access for $cfg:"; grep FAIL /tmp/argus_pf; }
   done
   $DOCKER build -q --build-arg WITH_TESTS=true -t argus-platform:test ./platform >/dev/null \
-    && $DOCKER run --rm argus-platform:test python -m pytest -q >/tmp/argus_pt 2>&1 \
+    && $DOCKER run --rm -v "$ROOT/deploy:/deploy:ro" argus-platform:test python -m pytest -q >/tmp/argus_pt 2>&1 \
     && ok "platform tests: $(tail -1 /tmp/argus_pt)" || { fail "platform tests:"; tail -15 /tmp/argus_pt; }
   $DOCKER build -q --build-arg WITH_TESTS=true -t argus-stream:test ./stream >/dev/null \
     && $DOCKER run --rm argus-stream:test python -m pytest -q >/tmp/argus_st 2>&1 \

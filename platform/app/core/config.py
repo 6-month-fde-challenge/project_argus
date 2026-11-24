@@ -37,10 +37,25 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
+    # the repository the platform administers (docker-compose mounts it): .env for the Settings page, the operations
+    # catalogue (deploy/ops_actions.json) for the Operations page. The operations agent on the host runs the actions.
+    repo_dir: Path = Path("/workspace/repo")
+    agent_stale_s: float = 15.0                       # no heartbeat for this long: the agent is offline
+    github_api: str = "https://api.github.com"        # AWS page: deploy / destroy run the repository's workflows
+
     @property
     def platform_dir(self) -> Path:
         """Platform-owned state (job registry) lives next to the runs, outside any run folder."""
         return self.outputs_dir / "_platform"
+
+    @property
+    def env_path(self) -> Path:
+        return self.repo_dir / ".env"
+
+    @property
+    def ops_dir(self) -> Path:
+        """Shared with deploy/agent.py: requests, logs, the agent's heartbeat (training/outputs/_platform/ops)."""
+        return self.platform_dir / "ops"
 
 
 @lru_cache

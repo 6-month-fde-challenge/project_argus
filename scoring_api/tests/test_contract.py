@@ -421,3 +421,34 @@ def test_a_run_is_served_with_the_prompt_cap_it_was_trained_with(tmp_path):
     (tmp_path / "b" / "report.json").write_text("not json")
     assert run_max_length(tmp_path / "a", 384) == 1024
     assert run_max_length(tmp_path / "b", 384) == 384 and run_max_length(tmp_path / "missing", 384) == 384
+
+
+def test_health_tells_callers_whether_live_traffic_meets_a_demo_model(tmp_path, monkeypatch):
+    """ops.py refuses to connect AWS, and the stream alarms, from exactly these fields."""
+    import asyncio
+    from types import SimpleNamespace
+    from argus_api import app as app_mod
+
+    for name, mode in (("measured", "auto"), ("demo", "llm")):
+        make_run(tmp_path, name, "xgboost")
+        (tmp_path / name / "report.json").write_text(json.dumps({"config": {"gate": {"mode": mode}}}))
+        (tmp_path / name / "gate").mkdir()
+        (tmp_path / name / "gate" / "decision.json").write_text(json.dumps({"decision": "HYBRID", "mode": mode}))
+
+    class Explainer:
+        async def healthy(self):
+            return True
+
+    models = SimpleNamespace(scorer=SimpleNamespace(version="v1", kind="xgboost"), active="measured", allow_forced=False,
+                             outputs_dir=tmp_path, shadow_run=None)
+    for key, value in {"models": models, "explainer": Explainer(), "store": [1, 2],
+                       "rules": SimpleNamespace(versions={"rules_version": 1, "threshold_version": 1}),
+                       "admission": SimpleNamespace(stats=lambda: {})}.items():
+        monkeypatch.setitem(app_mod.state, key, value)
+    h = asyncio.run(app_mod.health())
+    assert (h["serving_mode"], h["active_run_forced"], h["active_run_forced_reason"]) == ("production", False, None)
+    models.active = "demo"
+    h = asyncio.run(app_mod.health())
+    assert h["active_run_forced"] and "gate.mode: llm" in h["active_run_forced_reason"]
+    models.allow_forced = True
+    assert asyncio.run(app_mod.health())["serving_mode"] == "demo"

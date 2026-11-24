@@ -25,13 +25,19 @@ def _request(row) -> dict:
     }
 
 
-@lru_cache(maxsize=1)
-def _from_dataset(data_dir: str) -> list[dict]:
-    import pandas as pd
+def _dataset_files(data_dir: str) -> tuple[tuple[str, float], ...]:
+    """The validation parquet files with their modification times: the cache key, so a dataset synced (or replaced)
+    after the platform started is picked up, and an empty result before the first sync is never kept."""
     files = sorted(Path(data_dir, "raw", "parquet", "transactions", "validation").glob("*.parquet"))
+    return tuple((str(f), f.stat().st_mtime) for f in files)
+
+
+@lru_cache(maxsize=2)
+def _from_dataset(files: tuple[tuple[str, float], ...]) -> list[dict]:
+    import pandas as pd
     if not files:
         return []
-    df = pd.concat(pd.read_parquet(f) for f in files)
+    df = pd.concat(pd.read_parquet(f) for f, _ in files)
     picks = [("Known fraud (validation)", df[df.fraud_label == 1].head(3)),
              ("Genuine payment (validation)", df[df.fraud_label == 0].head(3)),
              ("Night-time gaming", df[(df.merchant_category == "gaming") & (df.transaction_time.dt.hour < 2)].head(2))]
@@ -48,4 +54,4 @@ def sample_requests(data_dir: Path) -> list[dict]:
            "note": "not in the dataset: scored from request fields only (FEATURES_DEGRADED)"}
     invalid = {"label": "Invalid: negative amount", "request": {**CRD_EXAMPLE, "transaction_id": "TX_BAD", "transaction_amount": -5},
                "note": "expect HTTP 400 INVALID_REQUEST (FR-API-02)"}
-    return [crd, *_from_dataset(str(data_dir)), invalid]
+    return [crd, *_from_dataset(_dataset_files(str(data_dir))), invalid]

@@ -3,17 +3,20 @@
 #   setup -> health check -> train the profile's runs -> reports -> serve the result -> API scenarios + load test
 #   -> training/outputs/_deploy/aws.env (the settings `python deploy/ops.py up` needs on your PC)
 #
-#   bash deploy/hyperstack/pipeline.sh                    # PROFILE=demo: demo_hybrid, then demo_llm_scorer (reuses it)
 #   PROFILE=prod  bash deploy/hyperstack/pipeline.sh      # prod_a100 on one A100 80GB (HF_TOKEN for gated models)
+#   PROFILE=demo  bash deploy/hyperstack/pipeline.sh      # demo_hybrid, then demo_llm_scorer (forced: never live traffic)
 #   PROFILE=smoke bash deploy/hyperstack/pipeline.sh      # every stage, tiny sizes: is the VM healthy? (~20 min)
+#   bash deploy/hyperstack/pipeline.sh                    # the profile saved in .env (ARGUS_PROFILE); none saved: stops
 #   SKIP_TRAIN=1  bash deploy/hyperstack/pipeline.sh      # VM restarted: models already trained, just serve again
 #   SERVE_RUN=<run> ...                                   # serve another run than the profile's default
+# The UI's Operations page runs this same script through the operations agent (deploy/agent.py), which sets
+# ARGUS_PIPELINE_INSIDE=1: it then runs in the agent's own process (a systemd service, also safe to disconnect).
 #
 # Follow: tail -f training/outputs/_logs/pipeline.log     Result: training/outputs/_deploy/aws.env
 # Hyperstack firewall: inbound TCP 22 and 8080.
 set -uo pipefail
 source "$(dirname "$0")/_common.sh"
-PROFILE="${PROFILE:-demo}"
+PROFILE="$(resolve_profile)" || exit 1
 LOG="$LOGS/pipeline.log"
 
 if [ "${ARGUS_PIPELINE_INSIDE:-0}" != "1" ]; then

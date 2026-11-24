@@ -62,3 +62,20 @@ serve_run_for_profile() {
 scoring_config_for_profile() {  # the api: budgets the Fraud Model API runs with
   case "$1" in prod) echo "configs/prod_a100.yaml" ;; *) echo "configs/local_demo.yaml" ;; esac
 }
+
+# The VM profile is never assumed: PROFILE on the command line (one run), else ARGUS_PROFILE in .env (the UI's
+# Settings page sets it), else stop. A silent "demo" default could put a forced demo model behind live traffic.
+resolve_profile() {
+  local p="${PROFILE:-$(env_get ARGUS_PROFILE)}"
+  if [ -z "$p" ]; then
+    echo -e "\033[31mChoose a profile: PROFILE=prod|demo|smoke bash $0   (or ARGUS_PROFILE in .env / the UI's Settings page)\033[0m" >&2
+    echo "  prod   prod_a100 on an A100 80GB, measured gate: the only profile for live traffic (needs HF_TOKEN)" >&2
+    echo "  demo   demo_hybrid + demo_llm_scorer: forced branches for demonstrations, never behind live traffic" >&2
+    echo "  smoke  every stage with tiny sizes: is the VM healthy? (~20 min)" >&2
+    return 1
+  fi
+  case "$p" in prod|demo|smoke) ;; *)
+    [ -f "training/configs/$p.yaml" ] || { echo "unknown profile '$p': prod, demo, smoke or a training/configs/<name>.yaml" >&2; return 1; } ;;
+  esac
+  echo "$p"
+}

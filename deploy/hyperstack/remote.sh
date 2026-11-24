@@ -6,7 +6,8 @@
 #   export HS_KEY=~/.ssh/id_ed25519      # the key pair attached to the VM
 #
 #   bash deploy/hyperstack/remote.sh push              # copy this repo (code, configs, .env) to ~/argus_solution
-#   bash deploy/hyperstack/remote.sh setup [profile]   # setup_vm.sh on the VM (demo | prod | smoke)
+#   bash deploy/hyperstack/remote.sh setup [profile]   # setup_vm.sh on the VM (prod | demo | smoke; default: the
+#                                                      #   VM's saved ARGUS_PROFILE, none saved: it stops and asks)
 #   bash deploy/hyperstack/remote.sh pipeline [profile] # the whole model side, unattended (tmux)
 #   bash deploy/hyperstack/remote.sh train <profile> [args]  # one ladder run (tmux)
 #   bash deploy/hyperstack/remote.sh logs [train|pipeline]   # follow a log
@@ -46,8 +47,8 @@ push() {
 cmd="${1:-help}"; shift || true
 case "$cmd" in
   push)     push ;;
-  setup)    rsh "cd ~/$REMOTE_DIR && PROFILE=${1:-demo} bash deploy/hyperstack/setup_vm.sh" ;;
-  pipeline) rsh "cd ~/$REMOTE_DIR && PROFILE=${1:-demo} bash deploy/hyperstack/pipeline.sh" ;;
+  setup)    rsh "cd ~/$REMOTE_DIR && ${1:+PROFILE=$(printf '%q' "$1") }bash deploy/hyperstack/setup_vm.sh" ;;
+  pipeline) rsh "cd ~/$REMOTE_DIR && ${1:+PROFILE=$(printf '%q' "$1") }bash deploy/hyperstack/pipeline.sh" ;;
   train)    rsh "cd ~/$REMOTE_DIR && bash deploy/hyperstack/train.sh $(printf '%q ' "$@")" ;;
   logs)     rsh "tail -n 80 -f ~/$REMOTE_DIR/training/outputs/_logs/${1:-pipeline}.log" ;;
   status)   rsh "cd ~/$REMOTE_DIR && bash deploy/hyperstack/check.sh" ;;
@@ -57,8 +58,8 @@ case "$cmd" in
     port() { local v; v=$(printf '%s\n' "$remote_env" | grep -E "^ARGUS_$1_PORT=" | tail -1 | cut -d= -f2 | tr -d '\r'); echo "${v:-$2}"; }
     ui=$(port UI 3000); api=$(port API 8090); mlflow=$(port MLFLOW 5000); stream=$(port STREAM 8003)
     echo ">> http://localhost:$ui (UI)  :$api (platform)  :$mlflow (MLflow)  :$stream (stream, if running) - Ctrl-C to close"
-    ssh "${SSH_OPTS[@]}" -N -L "$ui:localhost:$ui" -L "$api:localhost:$api" -L "$mlflow:localhost:$mlflow" \
-      -L "$stream:localhost:$stream" "$TARGET" ;;
+    ssh "${SSH_OPTS[@]}" -N -L "$ui:127.0.0.1:$ui" -L "$api:127.0.0.1:$api" -L "$mlflow:127.0.0.1:$mlflow" \
+      -L "$stream:127.0.0.1:$stream" "$TARGET" ;;
   pull)
     mkdir -p training/outputs
     rsh "cd ~/$REMOTE_DIR && tar czf - --exclude='*/trainer' --exclude='_logs' training/outputs" | tar xzf - -C .

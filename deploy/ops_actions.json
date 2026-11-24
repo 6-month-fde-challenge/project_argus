@@ -1,0 +1,126 @@
+{
+  "_doc": [
+    "Every action the UI's Operations / Settings pages can run, and exactly what it runs (deploy/agent.py executes it,",
+    "the platform validates parameters and shows the command). Nothing else can be run through the UI.",
+    "Tokens: \"{p}\" = the value of param p (token dropped when empty); \"{p?TEXT}\" = TEXT when p is true;",
+    "\"{p*}\" = one token per item of list p; \"x{p}y\" = p inside a token. A command starting with \"argus.ps1\" runs",
+    "through Windows PowerShell. approval: \"production\" = two named people and a reason while the API runs in",
+    "production mode. timeout_min: null = no limit (long jobs)."
+  ],
+  "actions": {
+    "serve": {
+      "label": "Serve a run", "group": "Serving", "approval": "production", "timeout_min": 30,
+      "description": "Starts the UI stack, the Fraud Model API and the vLLM explainer with this run (scoring only when the run has no AWQ explainer).",
+      "params": {"run": {"type": "run", "required": true, "label": "run"}},
+      "linux": ["bash", "deploy/hyperstack/serve.sh", "{run}"],
+      "windows": ["argus.ps1", "serve", "{run}"]
+    },
+    "unserve": {
+      "label": "Stop serving", "group": "Serving", "approval": "production", "timeout_min": 10,
+      "description": "Stops the Fraud Model API and vLLM (frees the GPU for training). Live traffic falls back to the fail-open rule.",
+      "params": {},
+      "linux": ["bash", "deploy/hyperstack/serve.sh", "stop"],
+      "windows": ["argus.ps1", "unserve"]
+    },
+    "apply": {
+      "label": "Apply settings", "group": "Serving", "approval": null, "timeout_min": 20,
+      "description": "Recreates services so they pick up changed settings (.env). Serving and stream services only if they run now.",
+      "params": {"services": {"type": "services", "required": true, "label": "services",
+                              "options": ["frontend", "platform", "mlflow", "scoring", "explainer", "stream", "kinesis"]}},
+      "linux": ["bash", "deploy/hyperstack/apply.sh", "{services*}"],
+      "windows": ["argus.ps1", "apply", "{services*}"]
+    },
+    "pipeline": {
+      "label": "Run the whole pipeline", "group": "Pipeline", "approval": "production", "timeout_min": null,
+      "description": "setup -> health check -> train the profile's runs -> reports -> serve -> API scenarios + load test -> aws.env (deploy/hyperstack/pipeline.sh).",
+      "params": {"profile": {"type": "vm_profile", "required": true, "label": "profile"},
+                 "skip_train": {"type": "bool", "label": "skip training (models already trained)"},
+                 "serve_run": {"type": "run", "label": "serve another run (optional)"}},
+      "env": {"PROFILE": "{profile}", "SKIP_TRAIN": "{skip_train?1}", "SERVE_RUN": "{serve_run}", "ARGUS_PIPELINE_INSIDE": "1"},
+      "linux": ["bash", "deploy/hyperstack/pipeline.sh"],
+      "windows": null
+    },
+    "setup": {
+      "label": "Set up / update the VM", "group": "Pipeline", "approval": null, "timeout_min": null,
+      "description": "deploy/hyperstack/setup_vm.sh: Docker + NVIDIA toolkit (if missing), .env secrets, images, data and the profile's models. Safe to re-run.",
+      "params": {"profile": {"type": "vm_profile", "required": true, "label": "profile"}},
+      "env": {"PROFILE": "{profile}"},
+      "linux": ["bash", "deploy/hyperstack/setup_vm.sh"],
+      "windows": null
+    },
+    "check": {
+      "label": "Health check", "group": "Health", "approval": null, "timeout_min": 45,
+      "description": "deploy/hyperstack/check.sh: GPU, disk, Docker, .env, data, images, runs and services (full: also CUDA in the image, model access and the test suites).",
+      "params": {"full": {"type": "bool", "label": "full check"}},
+      "linux": ["bash", "deploy/hyperstack/check.sh", "{full?--full}"],
+      "windows": ["argus.ps1", "status"]
+    },
+    "demo": {
+      "label": "API scenarios (CRD 10 / LLD 6)", "group": "Health", "approval": null, "timeout_min": 20,
+      "description": "Replays the CRD / LLD scenarios against the running Fraud Model API; results in training/outputs/<run>/api/demo_results.json.",
+      "params": {"run": {"type": "run", "required": true, "label": "active run"},
+                 "config": {"type": "serving_config", "required": true, "label": "serving profile"}},
+      "linux": ["docker", "compose", "--profile", "serve", "exec", "-T", "scoring", "python", "-m", "argus_api.demo",
+                "--config", "{config}", "--run", "{run}", "--url", "http://localhost:8080"],
+      "windows": ["argus.ps1", "demo"]
+    },
+    "loadtest": {
+      "label": "Load test (OBJ-10)", "group": "Health", "approval": "production", "timeout_min": 30,
+      "description": "End-to-end latency at a fixed request rate against the running Fraud Model API (it competes with live traffic).",
+      "params": {"run": {"type": "run", "required": true, "label": "active run"},
+                 "config": {"type": "serving_config", "required": true, "label": "serving profile"},
+                 "rps": {"type": "int", "required": true, "min": 1, "max": 200, "default": 5, "label": "requests / s"},
+                 "duration": {"type": "int", "required": true, "min": 5, "max": 600, "default": 30, "label": "seconds"}},
+      "linux": ["docker", "compose", "--profile", "serve", "exec", "-T", "scoring", "python", "-m", "argus_api.loadtest",
+                "--config", "{config}", "--run", "{run}", "--url", "http://localhost:8080", "--rps", "{rps}",
+                "--duration", "{duration}", "--fresh-time"],
+      "windows": ["argus.ps1", "loadtest", "{rps}", "{duration}"]
+    },
+    "stream_start": {
+      "label": "Start the local stream", "group": "Stream", "approval": null, "timeout_min": 10,
+      "description": "Kinesis emulator + stream scorer on this machine (the Live stream page). On AWS the stream runs on Fargate.",
+      "params": {},
+      "linux": ["docker", "compose", "--profile", "stream", "up", "-d", "kinesis", "stream"],
+      "windows": ["argus.ps1", "stream"]
+    },
+    "stream_stop": {
+      "label": "Stop the local stream", "group": "Stream", "approval": null, "timeout_min": 10,
+      "description": "Stops the local Kinesis emulator and stream scorer.",
+      "params": {},
+      "linux": ["docker", "compose", "--profile", "stream", "stop", "stream", "kinesis"],
+      "windows": ["argus.ps1", "stream", "stop"]
+    },
+    "sync_data": {
+      "label": "Sync the dataset", "group": "Data and models", "approval": null, "timeout_min": 60,
+      "description": "Downloads dataset changes from Supabase (training files and the feature / label tables).",
+      "params": {},
+      "linux": ["docker", "compose", "run", "--rm", "--no-deps", "-T", "trainer", "python", "-c",
+                "from argus_ft.supabase_data import fetch_tables, sync; sync('data/raw'); fetch_tables('data/db')"],
+      "windows": ["docker", "compose", "run", "--rm", "--no-deps", "-T", "trainer", "python", "-c",
+                  "from argus_ft.supabase_data import fetch_tables, sync; sync('data/raw'); fetch_tables('data/db')"]
+    },
+    "prefetch": {
+      "label": "Download a profile's models", "group": "Data and models", "approval": null, "timeout_min": null,
+      "description": "Checks gated access and downloads every model a profile uses, so GPU time is never spent downloading.",
+      "params": {"profile": {"type": "profile", "required": true, "label": "profile"}},
+      "linux": ["docker", "compose", "run", "--rm", "--no-deps", "-T", "trainer", "python", "-m", "argus_ft.prefetch",
+                "--config", "configs/{profile}.yaml"],
+      "windows": ["argus.ps1", "prefetch", "{profile}"]
+    },
+    "report": {
+      "label": "Compare runs (report)", "group": "Data and models", "approval": null, "timeout_min": 20,
+      "description": "Writes report.md per run and training/outputs/comparison.md for the selected runs.",
+      "params": {"runs": {"type": "runs", "required": true, "label": "runs"}},
+      "linux": ["docker", "compose", "run", "--rm", "--no-deps", "-T", "trainer", "python", "-m", "argus_ft.compare", "{runs*}"],
+      "windows": ["docker", "compose", "run", "--rm", "--no-deps", "-T", "trainer", "python", "-m", "argus_ft.compare", "{runs*}"]
+    },
+    "build": {
+      "label": "Build images", "group": "Build", "approval": null, "timeout_min": null,
+      "description": "Rebuilds images after a code update (training first: scoring and MLflow build on it). Apply afterwards to restart services.",
+      "params": {"services": {"type": "services", "required": true, "label": "images",
+                              "options": ["trainer", "scoring", "platform", "frontend", "stream"]}},
+      "linux": ["docker", "compose", "--profile", "serve", "--profile", "stream", "--profile", "job", "build", "{services*}"],
+      "windows": ["docker", "compose", "--profile", "serve", "--profile", "stream", "--profile", "job", "build", "{services*}"]
+    }
+  }
+}

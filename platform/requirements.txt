@@ -10,3 +10,4 @@ nvidia-ml-py==13.615.71  # GPU telemetry (NVML, read-only)
 mammoth==1.13.0          # client .docx -> HTML
 pandas==3.1.1            # sample scoring requests from the dataset
 pyarrow==26.0.1
+pynacl==1.6.2           # GitHub Actions secrets are sealed-box encrypted (AWS page: sync settings to GitHub)

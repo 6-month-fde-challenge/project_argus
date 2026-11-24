@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 
 from ...core.container import Container, get_container
 from ...core.errors import BadRequest, UpstreamError
+from ...core.governance import configured_mode
 
 router = APIRouter(tags=["system"])
 
@@ -36,16 +37,30 @@ async def services(c: Container = Depends(get_container)):
             return False
         return await client.up(path)
 
-    scoring, mlflow, explainer, stream = await asyncio.gather(probe("scoring", c.scoring, "/v1/health"),
-                                                              c.mlflow.up("/health", timeout=5.0),
-                                                              probe("explainer", c.explainer, "/health"),
-                                                              c.stream.up("/live/health"))
+    async def scoring_health() -> dict | None:  # the body too: serving mode and whether the live run is a demo
+        if containers.get("scoring", "running") != "running":
+            return None
+        try:
+            status, body = await c.scoring.request("GET", "/v1/health", timeout=2.0)
+        except UpstreamError:
+            return None
+        return body if status < 500 and isinstance(body, dict) else None
+
+    health, mlflow, explainer, stream = await asyncio.gather(scoring_health(), c.mlflow.up("/health", timeout=5.0),
+                                                             probe("explainer", c.explainer, "/health"),
+                                                             c.stream.up("/live/health"))
+    scoring = health is not None
     return {
         "platform": "ok", "docker": docker, "containers": containers,
         "scoring": "ok" if scoring else "down", "explainer": "ok" if explainer else "down",
         "mlflow": "ok" if mlflow else "down", "mlflow_url": c.settings.mlflow_public_url,
         "stream": "ok" if stream else "down",
         "gpu_jobs": [j["run_name"] for j in c.jobs.active() if j["status"] == "running"],
+        # production = demo runs refused; demo_model = the API serves a demo setup right now (top-bar badge)
+        "serving_mode": (health or {}).get("serving_mode") or configured_mode(c)["mode"],
+        "active_run": (health or {}).get("active_run"),
+        "demo_model": bool(health) and ((health or {}).get("serving_mode") != "production" or bool(health.get("active_run_forced"))),
+        "agent": c.ops.agent().get("online", False),
     }
 
 

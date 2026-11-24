@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "motion/react";
-import { Eye, Rocket, Square, Terminal } from "lucide-react";
+import { Eye, Rocket, Save, Square, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
@@ -56,6 +56,28 @@ function JobQueue() {
   );
 }
 
+/** These parameter changes as a reusable profile: extends the chosen one, lists only what differs (Profiles page). */
+function SaveAsProfile({ parent, overrides, onClose, onSaved }: { parent: string; overrides: string[]; onClose: () => void; onSaved: (name: string) => void }) {
+  const [name, setName] = useState(`${parent}_custom`);
+  const [description, setDescription] = useState("");
+  const save = useMutation({
+    mutationFn: () => api.post<{ name: string }>("/profiles", { name, extends: parent, overrides, description }),
+    onSuccess: (p) => { toast.success(`Profile ${p.name} saved (training/configs/${p.name}.yaml)`); onSaved(p.name); onClose(); },
+    onError: (e) => toast.error(errorMessage(e)),
+  });
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()} title="Save as profile" description={`A new training/configs/<name>.yaml that extends ${parent} with these ${overrides.length} change(s). Editable later on the Profiles page.`}>
+      <div className="space-y-3">
+        <div><Label>name</Label><Input value={name} onChange={(e) => setName(e.target.value.toLowerCase())} /></div>
+        <div><Label>description</Label><Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="what it is for" /></div>
+        <CodeView value={overrides.join("\n")} language="text" maxHeight="200px" />
+        <div className="flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={() => save.mutate()} loading={save.isPending} disabled={!/^[a-z0-9][a-z0-9_]{1,40}$/.test(name)}><Save className="h-4 w-4" /> Save</Button></div>
+      </div>
+    </Dialog>
+  );
+}
+
 export default function LaunchPage() {
   const [params] = useSearchParams();
   const rerun = params.get("rerun");
@@ -73,6 +95,7 @@ export default function LaunchPage() {
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [extra, setExtra] = useState("");
   const [preview, setPreview] = useState<Preview | null>(null);
+  const [saveAs, setSaveAs] = useState(false);
 
   useEffect(() => {
     if (rerunRun) {
@@ -169,11 +192,14 @@ export default function LaunchPage() {
           <div className="flex flex-wrap items-center gap-3">
             <Button size="lg" onClick={() => previewM.mutate()} loading={previewM.isPending}><Eye className="h-4 w-4" /> Preview</Button>
             <Button size="lg" variant="primary" onClick={() => launchM.mutate()} loading={launchM.isPending}><Rocket className="h-4 w-4" /> Launch</Button>
+            {overrides.length > 0 && <Button size="lg" variant="ghost" onClick={() => setSaveAs(true)}><Save className="h-4 w-4" /> Save as profile</Button>}
             {overrides.length > 0 && <span className="text-xs text-muted">{overrides.length} override{overrides.length > 1 && "s"}: <code className="text-brand">{overrides.join("  ")}</code></span>}
           </div>
         </div>
         <div className="space-y-5"><JobQueue /></div>
       </div>
+      {saveAs && <SaveAsProfile parent={profile} overrides={overrides} onClose={() => setSaveAs(false)}
+        onSaved={(name) => { qc.invalidateQueries({ queryKey: keys.profiles }); setProfile(name); }} />}
       <Dialog open={!!preview} onOpenChange={(o) => !o && setPreview(null)} title={`Preview · ${preview?.run_name}`} description="Exactly what the job container will run" wide>
         {preview && <div className="space-y-4">
           <CodeView value={preview.command.join(" \\\n    ")} language="text" />

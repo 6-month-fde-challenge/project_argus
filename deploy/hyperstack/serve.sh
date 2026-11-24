@@ -49,8 +49,13 @@ env_set RUN_NAME "$RUN"
 env_set EXPLAINER_RUN "$RUN"
 compose up -d
 [ "$SERVICES" = "scoring" ] && compose --profile serve stop explainer 2>/dev/null || true
-# shellcheck disable=SC2086  # SERVICES is a list of service names
-compose --profile serve up -d --force-recreate $SERVICES  # recreate: the explainer mounts the run's model
+# The scorer first and on its own: payments need it. The explainer is optional (the API explains with templates
+# without it), so a vLLM image that cannot be pulled or a model that does not fit never blocks scoring.
+compose --profile serve up -d --force-recreate scoring
+if [ "$SERVICES" != "scoring" ]; then
+  compose --profile serve up -d --force-recreate explainer \
+    || info "the vLLM explainer did not start (image download / GPU memory?): explanations come from templates; run serve.sh $RUN again to retry"
+fi
 HEALTH="http://localhost:$SCORING_PORT/v1/health"
 echo -n "Loading $RUN on the GPU"
 for _ in $(seq 1 180); do

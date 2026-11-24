@@ -30,6 +30,7 @@ function safeJson(text: string): unknown {
 export const api = {
   get: <T,>(path: string, signal?: AbortSignal) => request<T>("GET", path, undefined, signal),
   post: <T,>(path: string, body?: unknown) => request<T>("POST", path, body ?? {}),
+  put: <T,>(path: string, body?: unknown) => request<T>("PUT", path, body ?? {}),
   del: <T,>(path: string, body?: unknown) => request<T>("DELETE", path, body),
   text: async (path: string) => {
     const res = await fetch(`${API_BASE}${path}`);

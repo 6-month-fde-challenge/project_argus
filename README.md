@@ -21,7 +21,7 @@ This folder holds the complete working solution:
 | What was asked | [1. The client brief](#1-the-client-brief) · [2. Requirements coverage](#2-requirements-coverage) |
 | Design | [3. System design](#3-system-design) · [4. Training ladder](#4-training-ladder-design) · [5. Data and features](#5-data-and-features) · [6. Scoring path](#6-scoring-path-design) · [7. Control plane and UI](#7-control-plane-and-ui-design) |
 | API design | [8. Fraud Model API](#8-api-design-fraud-model-api-scoring-8080) · [9. Platform API](#9-api-design-platform-api-8090apiv1) · [10. File contracts](#10-file-contracts) |
-| Running it | [11. Prerequisites](#11-prerequisites) · [11a. Another machine / cloud](#11a-another-machine-or-another-cloud) · [12. Quick start](#12-quick-start) · [13. Services](#13-services-and-ports) · [14. UI](#14-the-ui) · [15. Training](#15-training) · [16. Serving](#16-serving-and-api-testing) · [16a. Real-time stream](#16a-real-time-stream) · [Deployment](deploy/README.md) |
+| Running it | [11. Prerequisites](#11-prerequisites) · [11a. Another machine / cloud](#11a-another-machine-or-another-cloud) · [12. Quick start](#12-quick-start) · [13. Services](#13-services-and-ports) · [14. UI](#14-the-ui) · [14a. UI and by hand](#14a-everything-from-the-ui-everything-by-hand) · [15. Training](#15-training) · [16. Serving](#16-serving-and-api-testing) · [16a. Real-time stream](#16a-real-time-stream) · [Deployment](deploy/README.md) |
 | Operating it | [17. Logs](#17-logs-where-to-look) · [18. Where to change things](#18-where-to-change-things) · [19. Tests](#19-tests) · [20. Troubleshooting](#20-troubleshooting) |
 | Results and plan | [21. Results](#21-results-so-far) · [22. Local vs production](#22-local-demo-vs-production) · [23. Plan](#23-plan) · [24. Risks](#24-risks-and-mitigations) · [25. Folder layout](#25-folder-layout) · [26. Demo video](#26-demo-video) |
 
@@ -609,8 +609,10 @@ yourself instead. `.\argus.ps1` with no arguments lists the actions.
 |---|---|
 | `build` | `docker compose build trainer; docker compose --profile serve build scoring; docker compose build platform frontend; docker compose --profile stream build stream` |
 | `up` | `docker compose up -d` |
-| `serve [run]` | `$env:RUN_NAME="<run>"; $env:EXPLAINER_RUN="<run>"; docker compose --profile serve up -d scoring explainer` |
+| `serve [run]` | `RUN_NAME` / `EXPLAINER_RUN` saved in `.env`, then `docker compose --profile serve up -d scoring explainer` (scoring only when the run has no AWQ explainer) |
 | `unserve` | `docker compose --profile serve stop scoring explainer` |
+| `apply <service>...` | `docker compose up -d --no-deps <service>...` (serving / stream services only if running): after a `.env` change |
+| `agent [start\|stop\|status]` | `python deploy/agent.py`: the operations agent the UI's Operations / Settings pages use |
 | `train <profile> [run]` | `docker compose run --rm trainer python -m argus_ft.pipeline --config configs/<profile>.yaml --no-sync` |
 | `report` | `docker compose run --rm --no-deps trainer python -m argus_ft.compare argus_demo_hybrid argus_demo_llm_scorer` |
 | `demo` | `docker compose --profile serve exec scoring python -m argus_api.demo --run <active run> --url http://localhost:8080` |
@@ -651,14 +653,50 @@ yourself instead. `.\argus.ps1` with no arguments lists the actions.
 | **Launch** | pick a profile, name the run, edit parameters (only changed values become overrides), choose stages, reuse another run's artefacts, preview the exact command, start |
 | **Runs** | every run with status and progress; a run page has the live ladder, loss charts per stage (SSE, resumes after reconnect), container logs, per-stage results (pilot table, gate, calibration, fairness, explainer samples, holdout acceptance with PR / ROC curves and the GO / NO-GO checklist), artefacts and `report.md` |
 | **System** | services (start/stop scoring + explainer), GPU telemetry, the job queue (cancel) |
+| **Operations** | the GPU VM's scripts and `argus.ps1`, run from the UI through the operations agent: serve / stop serving a run, apply settings, the whole pipeline, VM setup, health check, API scenarios, load test, local stream, dataset sync, model download, reports, image builds. Every action shows its exact command (the same command works by hand), streams its log live and can be cancelled |
+| **Settings** | the repository's `.env` (the file compose, the scripts, `argus.ps1` and `ops.py` read): serving profile (production / demo mode), ports, network binding, tokens (generate / rotate, never shown), Supabase / Hugging Face keys, stream, AWS settings. Save writes the file, Apply restarts what reads it; the change log lists every UI change |
+| **Profiles** | the training profiles (`training/configs/*.yaml`): edit with validation (resolved exactly like the trainer; a change that would break a profile extending it is refused), create, delete your own. The Launch page saves its parameter changes as a new profile |
 | **Pipeline** | Figure 4 as an interactive graph; click a stage for what it does and its latest result |
 | **Compare** | up to 4 runs side by side (e.g. `argus_demo_hybrid` vs `argus_demo_llm_scorer`) |
 | **Registry** | registered models and versions from MLflow, plus the full MLflow UI embedded |
 | **Scoring** | API playground with ready samples (CRD worked example, known fraud, genuine, hard rule, invalid), deployments (switch the served run), recent decisions with async explanations |
 | **Live stream** | the real-time path: start / stop traffic, inject an attack wave, pipeline status (producer → Kinesis → Fraud Model API → action), decisions over time, reason codes, live recall / precision at BLOCK against ground truth, API p99, fail-open count, live feed; a **shadow run** picker with the live-vs-shadow comparison (MLOPS-06) |
 | **Rules & policy** | thresholds (global and per MCC, two-person approval), blocked devices, allowlisted customers, change log |
+| **AWS deployment** | the AWS stream through the repository's GitHub Actions (no AWS key on the VM): connection and variables, sync this machine's settings, deploy, destroy (typed confirmation), recent workflow runs |
 | **Dataset** | data card, quality report, splits |
 | **Docs & diagrams** | the client documents (`.docx` rendered in the browser) and the architecture diagrams |
+
+### 14a. Everything from the UI, everything by hand
+
+Every setting and operation has both ways, on the same files, so neither ever drifts from the other:
+
+| You change / run | In the UI | By hand | Where it lands |
+|---|---|---|---|
+| Ports, binding, tokens, keys, serving profile | Settings | edit `.env` | `.env` (git-ignored) |
+| Restart what reads a changed setting | Settings → Apply | `bash deploy/hyperstack/apply.sh <services>` / `.\argus.ps1 apply <services>` | the containers |
+| Serve a run, pipeline, setup, health check, ... | Operations | the command the page shows | `training/outputs/_platform/ops/` (request, log, result) |
+| Training profiles | Profiles, Launch → Save as profile | edit `training/configs/<name>.yaml` | `training/configs/` (tracked by git) |
+| Thresholds, lists | Rules & policy | admin API | `training/outputs/_scoring/` |
+| AWS deploy / destroy | AWS deployment | `python deploy/ops.py deploy` / `down` | GitHub Actions, then AWS |
+
+**The operations agent** (`deploy/agent.py`) is how the UI runs host commands: the platform runs in a container and
+cannot run the host's scripts, so it writes a request; the agent on the host re-checks it against the same catalogue
+(`deploy/ops_actions.json` + `deploy/ops_catalog.py`, the only actions that can run, with validated parameters, never
+a shell) and runs it. On the GPU VM it is the systemd service `argus-agent` (`setup_vm.sh` installs it); on Windows
+`.\argus.ps1 agent start`. Without the agent the UI still works; requests wait in the queue, and every page shows the
+command to run yourself.
+
+**Production mode and approval.** The serving profile decides the mode: `prod_a100` (`api.allow_forced_runs: false`)
+refuses demo runs (production); `local_demo` serves them (demo mode). In production, anything that changes what live
+traffic meets (serving profile, scoring token / port / binding, activating a run, serve / stop serving, the pipeline,
+load tests, AWS deploys) needs two different named people and a reason, recorded in the change log. There is no
+login: access to the UI is the SSH tunnel; the names are the audit trail. The UI never opens itself to the network
+(`ARGUS_BIND` is locked to 127.0.0.1 on the Settings page).
+
+**A demo model never serves real payments silently.** Three guards: the VM scripts never assume a profile
+(`PROFILE=prod|demo|smoke`, or `ARGUS_PROFILE` in `.env`); `ops.py check / up / deploy` and the AWS page refuse a Fraud
+Model API that serves a demo setup (unless `--allow-demo`, or *allow a demo setup* for one deploy); and the AWS stream
+checks every minute, raising the CloudWatch alarm `demo-model-serving` and a red banner on the Live stream page.
 
 ## 15. Training
 
@@ -825,12 +863,12 @@ a profile that enforces the ±15 min window.
 ```
 | Suite | Runs in | Covers |
 |---|---|---|
-| platform (pytest, 65 tests) | `argus-platform:test` | event tailing (offsets, partial/corrupt lines), live-state fold, interrupted runs, path traversal, profiles (extends, overrides, loops), job validation, FIFO GPU scheduler, cancel (incl. cancel during launch), the measured / demo run rule, every HTTP route incl. SSE streams and upstream-down errors |
-| scoring (pytest, 65 tests) | `argus-scoring` | CRD request validation edge cases, sanitising, policy boundaries, hard rules, allowlist cap, MCC overrides, two-person approval, hot reload / corrupt config, reason-code rules, explanation consistency guard, deployments (LRU), auth before validation, admission control, shadow run, forced runs refused in production, the run's own prompt cap |
+| platform (pytest, 83 tests) | `argus-platform:test` | event tailing (offsets, partial/corrupt lines), live-state fold, interrupted runs, path traversal, profiles (extends, overrides, loops), job validation, FIFO GPU scheduler, cancel (incl. cancel during launch), the measured / demo run rule, Settings (.env), Operations queue, profile editing, AWS through GitHub, two-person approval, files written into the repo stay owned by the VM user, every HTTP route incl. SSE streams and upstream-down errors |
+| scoring (pytest, 66 tests) | `argus-scoring` | CRD request validation edge cases, sanitising, policy boundaries, hard rules, allowlist cap, MCC overrides, two-person approval, hot reload / corrupt config, reason-code rules, explanation consistency guard, deployments (LRU), auth before validation, admission control, shadow run, forced runs refused in production, the run's own prompt cap |
 | frontend (vitest, 27 tests) | `node` build stage | formatters, null-safe ratios, overrides diff, API client errors, UI states, `Button asChild`, feature registry, a page bundle missing after a redeploy (reload once, never a blank page) |
 | training logic (pytest, 24 tests) | `argus-training` (`trainer`) | thresholds for recall / precision targets, curves, saved calibrators as served, review capacity, per-code F1, prompt formats, label maturity, every profile resolves, the acceptance checklist and report, the measured-run rule, stale LLM-scorer cleanup, registry status, tied thresholds |
-| stream (pytest, 35 tests) | `argus-stream:test` | CRD-valid synthetic and holdout events, fraud patterns, fail-open + circuit breaker, invalid requests, actions, idempotent store and live accuracy, shadow scoring and its back-off, store migration, API control key on reads and writes, a rejected token held for REVIEW, publish-before-store with checkpoints and resume, a recreated stream never inheriting old checkpoints, Kinesis round trip (moto) |
-| deploy (pytest, 6 tests) | `python:3.12` | `ops.py`: Terraform settings carried to CI without secrets, the allow-list, the Fraud Model API check (token accepted / rejected / no model, against a local HTTP stub), empty CI variables, `.env` last-value-wins and PowerShell appends |
+| stream (pytest, 44 tests) | `argus-stream:test` | CRD-valid synthetic and holdout events, fraud patterns, fail-open + circuit breaker, invalid requests, actions, idempotent store and live accuracy, shadow scoring and its back-off, store migration, API control key on reads and writes, a rejected token held for REVIEW, publish-before-store with checkpoints and resume, a recreated stream never inheriting old checkpoints, Kinesis round trip (moto) |
+| deploy (pytest, 31 tests) | `python:3.12` | `ops.py`: Terraform settings carried to CI without secrets, the allow-list, the Fraud Model API check (token accepted / rejected / no model, against a local HTTP stub), empty CI variables, `.env` last-value-wins and PowerShell appends, the demo-model guard, the operations agent and its catalogue, and the GPU VM scripts themselves run under bash with stubbed docker / tmux / ssh (profile choice, apply, serve, pipeline, remote) |
 
 CI (`.github/workflows/ci.yml`) runs all of them on every push and pull request, plus `terraform validate`, shellcheck
 of the GPU VM scripts and the compose file.

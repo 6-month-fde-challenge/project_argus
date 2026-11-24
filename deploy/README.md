@@ -87,6 +87,22 @@ Terraform creates the rest: the Kinesis streams, Firehose, buckets, the stream c
 
 ---
 
+### First real deployment: what only the VM and AWS can confirm
+
+Everything else is covered by the test suites and CI (including the GPU VM scripts, run under bash with stubbed
+tools). These are the facts of the real environment; tick them once:
+
+| # | Check | Why |
+|---|---|---|
+| 1 | Run `setup_vm.sh` / `pipeline.sh` as the normal VM user (`ubuntu`), **not** with `sudo` | the operations agent runs as that user and every file the platform writes is given to the repository's owner; under `sudo` both become root |
+| 2 | `sudo -n true` works on the VM (passwordless sudo, the Hyperstack default) | the agent runs `setup_vm.sh` from the UI without a terminal to type a password in |
+| 3 | `PROFILE=prod` (or `ARGUS_PROFILE=prod` saved) on the VM that AWS calls | only `prod_a100` is production mode; `ops.py check` / `deploy` refuse a demo setup |
+| 4 | Hyperstack firewall: inbound TCP 22 and the scoring port (8080) | AWS Fargate calls the Fraud Model API; everything else goes through the SSH tunnel |
+| 5 | `sudo systemctl status argus-agent` is active, and the UI's Operations page shows *agent on <vm> (linux)* | otherwise UI actions wait in the queue (the shown commands still work by hand) |
+| 6 | `python deploy/ops.py check` ends with "ready to deploy" from your PC | tools, AWS identity, the API's token **and serving mode**, isolation |
+| 7 | Confirm the SNS e-mail subscription AWS sends to `TF_VAR_alert_email` | alarms (fail-open, demo-model-serving, latency, ...) only arrive after the confirmation |
+| 8 | For the UI's AWS page only: `ARGUS_GITHUB_TOKEN` (fine-grained, this repository: Actions, Variables, Secrets read/write) | deploy / destroy from the UI run the repository's workflows |
+
 ## 4. Runbook (in this order)
 
 ### Step 1: the GPU VM
@@ -115,7 +131,7 @@ Or on the VM itself:
 ```bash
 git clone <this repo> argus_solution && cd argus_solution    # or remote.sh push
 cp -n .env.example .env && nano .env                         # first time: SUPABASE_URL, SUPABASE_KEY (+ HF_TOKEN)
-bash deploy/hyperstack/pipeline.sh                           # PROFILE=prod / smoke to change; runs in tmux
+PROFILE=prod bash deploy/hyperstack/pipeline.sh              # always name the profile (prod | demo | smoke); tmux
 tail -f training/outputs/_logs/pipeline.log
 ```
 
@@ -131,10 +147,15 @@ tail -f training/outputs/_logs/pipeline.log
 6. **Exercise it:** the CRD / LLD scenarios (`argus_api.demo`) and a 30-second load test (`argus_api.loadtest`),
    then write `training/outputs/_deploy/aws.env` for your PC.
 
+There is **no default profile**: the scripts take `PROFILE` from the command line, else `ARGUS_PROFILE` in `.env`
+(the first `setup_vm.sh` saves it; the UI's Settings page changes it), else they stop and ask. A silent `demo` default
+could put a forced demo model behind live AWS traffic. `PROFILE=prod` also switches the API to production mode
+(`SCORING_CONFIG=configs/prod_a100.yaml`: demo runs refused); a demo profile never loosens a production setting.
+
 | Variant | Command |
 |---|---|
-| demo profile (default) | `bash deploy/hyperstack/pipeline.sh` |
-| production profile, one A100 80GB | `PROFILE=prod bash deploy/hyperstack/pipeline.sh` |
+| production profile, one A100 80GB (the only one for live traffic) | `PROFILE=prod bash deploy/hyperstack/pipeline.sh` |
+| demo profile (forced branches: demonstrations only) | `PROFILE=demo bash deploy/hyperstack/pipeline.sh` |
 | quick health run of every stage | `PROFILE=smoke bash deploy/hyperstack/pipeline.sh` |
 | VM restarted, models already trained | `SKIP_TRAIN=1 bash deploy/hyperstack/pipeline.sh` |
 | serve another run | `SERVE_RUN=<run> SKIP_TRAIN=1 bash deploy/hyperstack/pipeline.sh` |
@@ -224,22 +245,30 @@ On the VM: `bash deploy/hyperstack/serve.sh stop`, `tmux kill-server`, then **hi
 
 | Script | Runs on | Does |
 |---|---|---|
-| `setup_vm.sh` | VM | Docker + NVIDIA Container Toolkit, `.env` secrets and bindings, all images, data, model weights (`PROFILE=demo\|prod\|smoke`) |
+| `setup_vm.sh` | VM | Docker + NVIDIA Container Toolkit, `.env` secrets and bindings, all images, data, model weights, the operations agent service (`PROFILE=prod\|demo\|smoke`) |
 | `check.sh [--full]` | VM | host, `.env`, data, images, runs (with holdout verdicts), services; `--full`: CUDA in the training image, gated-model access, test suites |
 | `train.sh <profile> [args]` | VM | one ladder run in tmux `train` (stops serving first); args go to `argus_ft.pipeline` (`--stages`, `--set`) |
 | `serve.sh [run\|stop]` | VM | UI + platform + MLflow + Fraud Model API + vLLM for a run (newest servable by default); waits until healthy |
 | `pipeline.sh` | VM | everything above, unattended in tmux `pipeline`, then `aws.env` |
+| `apply.sh <service>...` | VM | after a `.env` change: recreates those services (serving / stream ones only if running) |
+| `deploy/agent.py` | VM (systemd `argus-agent`) / Windows (`.\argus.ps1 agent start`) | the operations agent: runs what the UI's Operations / Settings pages ask for, only from `deploy/ops_actions.json`, with validated parameters; logs in `training/outputs/_platform/ops/` |
 | `remote.sh <cmd>` | your PC | `push`, `setup`, `pipeline`, `train`, `logs`, `status`, `tunnel`, `pull`, `awsenv`, `ssh` over SSH |
 
 Logs: `training/outputs/_logs/{pipeline,train}.log`. Every training run also writes `events.jsonl`, so the UI follows
 CLI runs live.
 
+**The same from the UI.** Every script above is also an action on the UI's **Operations** page (through the agent,
+with live log and cancel), and every `.env` setting is on the **Settings** page; the page shows the exact command, so
+both ways always match. The first `setup_vm.sh` must run by hand: it installs Docker and the agent the UI relies on.
+The agent needs `sudo` without a password for the steps that install packages (the default on Hyperstack images).
+
 ### AWS: `deploy/ops.py` (also `.\argus.ps1 aws <command>`)
 
 | Command | Does |
 |---|---|
-| `check` | read-only: tools, AWS identity, Fraud Model API health + token, allow-list, isolation |
+| `check` | read-only: tools, AWS identity, Fraud Model API health + token + serving mode, allow-list, isolation |
 | `up` | `check` → `bootstrap` → `deploy` |
+| `--allow-demo` (on `check` / `up` / `deploy`) | accept a Fraud Model API that serves a demo setup (otherwise refused: live traffic must never meet a demo model). CI: repository variable `ALLOW_DEMO=true`, or the deploy workflow's `allow_demo` input for one run |
 | `bootstrap` | state bucket, OIDC provider (if none), deploy role, `production` environment on main only, GitHub variables + secret |
 | `deploy [--tag T]` | image build + push, holdout to S3 (once), `terraform apply`, wait for the service |
 | `dataset [--dir D]` | re-copy the holdout and restart the service |
@@ -325,6 +354,8 @@ CLI runs live.
 | `check`: FAIL names already exist | a previous deployment lost its state: `ops.py audit`, remove the listed `argus-prod` items, or set `ENVIRONMENT=prod2` |
 | Live stream page: "stream service is not reachable" | `ARGUS_STREAM_URL` set for the platform and the platform restarted? The VM's IP in `allowed_cidrs` (re-run `ops.py deploy` after an IP change)? |
 | Every decision is `FAIL_OPEN` | the stream cannot reach the API: same fixes as the first row; the `scoring-unreachable` alarm says the same |
+| `check` / `deploy` refused: "runs in demo mode" or "is a demo run" | the VM serves a demo setup: `PROFILE=prod bash deploy/hyperstack/pipeline.sh` (or Settings → Serving profile `prod_a100`, then Operations → Serve a measured run). Only for a deliberate demo: `--allow-demo` |
+| Alarm `demo-model-serving` / red banner on the Live stream page | someone switched the API behind live traffic to a demo setup: same fix as the row above, then the alarm clears within two minutes |
 | Every decision is `AUTH_ERROR` | the API rejects the stream's token: `TF_VAR_scoring_token` = the VM's `ARGUS_SCORING_TOKEN`, then `ops.py deploy` |
 | Synthetic transactions get HTTP 400 | the API runs a profile with the ±15 min window (`SCORING_CONFIG=configs/prod_a100.yaml`): `TF_VAR_transaction_time=now`, then `ops.py deploy` |
 | `setup_vm.sh`: containers cannot see the GPU | the image's driver is too old or the toolkit failed: pick a newer NVIDIA image and re-run |

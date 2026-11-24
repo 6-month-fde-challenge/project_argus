@@ -585,3 +585,90 @@ def test_a_store_without_a_recorded_stream_resumes_by_time():
     p = Processor(store, client_for(), kinesis=object())
     assert p.resume_point("2026-11-23T14:47:00+00:00", 1000.0) == 995.0 and store.checkpoints() == {}
     assert store.get_meta("tx_stream_epoch") == "2026-11-23T14:47:00+00:00"
+
+
+def health_api(**health) -> ScoringClient:
+    body = {"status": "ok", "scorer": "ok", "model_version": "m", "active_run": "argus_prod_a100", **health}
+    return ScoringClient("http://scoring:8080", "tok", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body)))
+
+
+@pytest.mark.parametrize("health,demo", [
+    ({"serving_mode": "production", "active_run_forced": False}, False),
+    ({"serving_mode": "production", "active_run_forced": True, "active_run_forced_reason": "gate.mode: llm"}, True),
+    ({"serving_mode": "demo"}, True),
+    ({}, True),                                                  # an API that cannot say: treated as demo
+    ({"serving_mode": "demo", "scorer": "down"}, False),         # no model: fail-open decides (its own alarm)
+])
+def test_the_stream_knows_when_live_traffic_meets_a_demo_model(health, demo):
+    client = health_api(**health)
+    client.check()
+    assert client.demo_model is demo and (client.demo_reason is not None) is demo
+
+
+def test_demo_model_serving_is_published_every_minute():
+    class FakeCw:
+        def __init__(self):
+            self.data = []
+
+        def put_metric_data(self, Namespace, MetricData):
+            self.data += MetricData
+
+    m = Metrics()
+    m.cw, m.namespace = FakeCw(), "ARGUS/prod"
+    m.demo_model = True
+    m.flush(force=True)
+    sent = {d["MetricName"]: d.get("Value") for d in m.cw.data}
+    assert sent["DemoModelServing"] == 1.0
+    m.demo_model = False
+    m.flush(force=True)
+    assert [d["Value"] for d in m.cw.data if d["MetricName"] == "DemoModelServing"] == [1.0, 0.0]
+
+
+def test_mode_refresh_never_touches_the_breaker():
+    client = health_api(serving_mode="demo")
+    client.open_until = 0.0
+    client.refresh_mode(every_s=0)
+    assert client.demo_model and client.open_until == 0.0
+
+
+def test_ensure_streams_tolerates_losing_the_create_race():
+    """The scorer and the traffic producer create the local streams at the same time: the loser must wait, not die."""
+    from argus_stream.bus import ensure_streams
+
+    class NotFound(Exception):
+        pass
+
+    class InUse(Exception):
+        pass
+
+    class RacingClient:
+        exceptions = type("E", (), {"ResourceNotFoundException": NotFound, "ResourceInUseException": InUse})
+
+        def __init__(self):
+            self.calls = 0
+
+        def describe_stream_summary(self, StreamName):
+            self.calls += 1
+            if self.calls == 1:
+                raise NotFound()  # not there yet when we look ...
+            return {"StreamDescriptionSummary": {"StreamStatus": "ACTIVE"}}
+
+        def create_stream(self, StreamName, ShardCount):
+            raise InUse()  # ... but the other thread created it first
+
+    ensure_streams(RacingClient(), ["argus-transactions"], wait_s=2)  # returns instead of raising
+
+
+def test_a_shed_shadow_request_is_skipped_without_backing_off():
+    """The API sheds the shadow when live traffic needs every slot: skip that one, try the next transaction at once."""
+    calls: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(503, json={"error": "UNAVAILABLE", "retry": True})
+
+    client = ScoringClient("http://scoring:8080", "tok", transport=httpx.MockTransport(handler))
+    client.shadow_run = "argus_demo_hybrid"
+    assert client.shadow_score(event()["request"]) is None and client.shadow_score(event()["request"]) is None
+    assert len(calls) == 2 and client.shadow_skipped == 2   # asked again: no back-off
+    assert client.shadow_open_until == 0.0

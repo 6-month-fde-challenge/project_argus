@@ -132,4 +132,5 @@ def run(ctx) -> dict:
                 client.set_model_version_tag(name, version, "status_reason", why[:500])
 
     return {"tracking_uri": store, "run_id": run.info.run_id, "metrics_logged": len(metrics),
-            "artefacts": logged, "registered_versions": versions, "status": status, "status_reason": why}
+            # never the key "status": the runner merges this into the stage result, whose status is ok / failed
+            "artefacts": logged, "registered_versions": versions, "version_status": status, "version_status_reason": why}

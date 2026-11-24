@@ -51,12 +51,17 @@ class ScoringClient:
                                  transport=transport)  # transport: tests inject a fake API
         self.open_until = 0.0
         self.status, self.model_version, self.active_run = "unknown", None, None
+        # what the API serves: "production" refuses demo runs; demo_model = live traffic meets a demo setup (alarm)
+        self.serving_mode: str | None = None
+        self.demo_model, self.demo_reason = False, None
+        self.mode_checked = 0.0
         self.scored = self.errors = 0
         self.auth_failed = False  # the last answer was 401: while the breaker is open, keep holding (never fail open)
         # shadow (MLOPS-06): a second run scores the same transaction; it never decides, and its own back-off keeps
         # a broken shadow from slowing the live path
         self.shadow_run: str | None = None
         self.shadow_open_until, self.shadow_status = 0.0, "off"
+        self.shadow_skipped = 0  # shadow requests shed by the API because live traffic needed every slot
 
     @property
     def enabled(self) -> bool:
@@ -66,12 +71,37 @@ class ScoringClient:
         try:
             body = self.http.get("/v1/health", timeout=3).json()
             self.status, self.model_version, self.active_run = body.get("status"), body.get("model_version"), body.get("active_run")
+            self._mode(body)
             ok = body.get("scorer") == "ok"
-        except (httpx.HTTPError, ValueError) as e:
+        except (httpx.HTTPError, ValueError, AttributeError) as e:
             self.status, ok = f"unreachable ({type(e).__name__})", False
         if not ok:
             self.open_until = time.monotonic() + BREAKER_OPEN_S
         return ok
+
+    def _mode(self, health: dict) -> None:
+        self.serving_mode = health.get("serving_mode")
+        if health.get("scorer") != "ok":
+            self.demo_model, self.demo_reason = False, None  # no model: fail-open decides, already alarmed
+        elif self.serving_mode != "production":
+            self.demo_model = True
+            self.demo_reason = f"the Fraud Model API runs in {self.serving_mode or 'an unknown'} mode (demo runs allowed)"
+        elif health.get("active_run_forced"):
+            self.demo_model = True
+            self.demo_reason = f"the active run {health.get('active_run')} is a demo run: {health.get('active_run_forced_reason')}"
+        else:
+            self.demo_model, self.demo_reason = False, None
+        self.mode_checked = time.monotonic()
+
+    def refresh_mode(self, every_s: float = 60) -> None:
+        """Re-read what the API serves once a minute (never touches the breaker): a demo model switched on behind live
+        traffic raises DemoModelServing within two minutes."""
+        if not self.enabled or time.monotonic() - self.mode_checked < every_s:
+            return
+        try:
+            self._mode(self.http.get("/v1/health", timeout=3).json())
+        except (httpx.HTTPError, ValueError, AttributeError):
+            self.mode_checked = time.monotonic()  # unreachable: the breaker and fail-open metrics already say so
 
     def ready(self) -> bool:
         return self.enabled and time.monotonic() >= self.open_until
@@ -117,6 +147,11 @@ class ScoringClient:
             resp = self.http.post(f"/v1/fraud/shadow/{run}", json=request)
         except httpx.HTTPError as e:
             self.shadow_open_until, self.shadow_status = time.monotonic() + BREAKER_OPEN_S, f"error ({type(e).__name__})"
+            return None
+        if resp.status_code == 503 and _retryable(resp):
+            # no free slot right now (the shadow never makes live traffic wait): skip this one, try the next at once.
+            # Backing off here would starve the comparison on a busy API although nothing is wrong.
+            self.shadow_status, self.shadow_skipped = "ok (skipping while live traffic needs the slots)", self.shadow_skipped + 1
             return None
         body = valid_reply(resp) if resp.status_code == 200 else None
         if body is None:
@@ -207,6 +242,7 @@ class Metrics:
     """Counters and API latency, pushed to CloudWatch (namespace CW_NAMESPACE) once a minute."""
 
     NAMES = ("Transactions", "Allowed", "Reviewed", "Blocked", "FailOpen", "AuthErrors", "LabelledFraud", "FraudMissed")
+    demo_model = False  # set by the processor each round: published as the DemoModelServing gauge (0 / 1)
 
     def __init__(self, namespace: str = ""):
         self.namespace, self.cw = namespace, None
@@ -243,6 +279,8 @@ class Metrics:
             data = [{"MetricName": k, "Dimensions": dims, "Value": float(v), "Unit": "Count"} for k, v in self.counts.items()]
             if lag_ms is not None:
                 data.append({"MetricName": "StreamLagMs", "Dimensions": dims, "Value": float(lag_ms), "Unit": "Milliseconds"})
+            # 1 while the API behind live traffic serves a demo setup: alarm demo-model-serving (deploy/terraform)
+            data.append({"MetricName": "DemoModelServing", "Dimensions": dims, "Value": float(self.demo_model), "Unit": "Count"})
             if self.latency:  # raw values (an even sample of at most 150), so CloudWatch can alarm on p99 (OBJ-10)
                 step = -(-len(self.latency) // 150)
                 data.append({"MetricName": "ApiLatency", "Dimensions": dims, "Unit": "Milliseconds",
@@ -252,7 +290,7 @@ class Metrics:
                     self.cw.put_metric_data(Namespace=self.namespace, MetricData=data[i : i + 20])
             except Exception as e:  # noqa: BLE001
                 log.warning("put_metric_data failed: %s", e)
-        log.info("metrics %s", json.dumps({**self.counts, "lag_ms": lag_ms}))
+        log.info("metrics %s", json.dumps({**self.counts, "lag_ms": lag_ms, "demo_model": self.demo_model}))
         self.reset()
 
 
@@ -416,6 +454,10 @@ class Processor(threading.Thread):
                         self.handle(events[i : i + self.batch], producer)
                     producer.poll()
                     self.state["lag_ms"] = reader.lag
+                    self.client.refresh_mode()
+                    if self.client.demo_model and not self.metrics.demo_model:
+                        log.error("DEMO MODEL SERVING LIVE TRAFFIC: %s", self.client.demo_reason)
+                    self.metrics.demo_model = self.client.demo_model
                     self.metrics.flush(reader.lag)
                     if not events:
                         self._notify([])  # BLOCK alerts still waiting for their SNS window

@@ -71,7 +71,8 @@ def pipeline() -> dict:
     return {**p.state, "uptime_s": round(time.time() - p.state["started"]),
             "scoring": {"url": c.url, "status": c.status, "model_version": c.model_version, "active_run": c.active_run,
                         "scored": c.scored, "errors": c.errors, "breaker_open": time.monotonic() < c.open_until,
-                        "shadow_run": c.shadow_run, "shadow_status": c.shadow_status},
+                        "shadow_run": c.shadow_run, "shadow_status": c.shadow_status, "shadow_skipped": c.shadow_skipped,
+                        "serving_mode": c.serving_mode, "demo_model": c.demo_model, "demo_reason": c.demo_reason},
             "producer": t.status() if t else {"running": False}}
 
 

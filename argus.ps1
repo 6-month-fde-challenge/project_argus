@@ -4,8 +4,10 @@
 
     .\argus.ps1 build                  build all images (training first: scoring and mlflow build on it)
     .\argus.ps1 up                     UI :3000, platform API :8090, MLflow :5000
-    .\argus.ps1 serve [run]            + Fraud Model API :8080 and vLLM explainer :8000 for a finished run
+    .\argus.ps1 serve [run]            + Fraud Model API :8080 and vLLM explainer :8000 for a finished run (saved in .env)
     .\argus.ps1 unserve                stop scoring + explainer (frees the GPU for training)
+    .\argus.ps1 apply <service>...     recreate services after a settings change (.env), like the UI's Settings page
+    .\argus.ps1 agent [start|stop|status]  the operations agent: lets the UI's Operations / Settings pages act on this PC
     .\argus.ps1 train <profile> [run]  a pipeline run from the CLI (smoke, local_demo, demo_hybrid, ...)
     .\argus.ps1 report                 report.md per demo run + outputs/comparison.md (hybrid vs LLM scorer)
     .\argus.ps1 demo                   CRD / LLD scenarios against the running scoring API -> outputs/<run>/api/
@@ -41,6 +43,17 @@ function Run([string] $cmd) {
   if ($LASTEXITCODE -ne 0) { throw "failed ($LASTEXITCODE): $cmd" }
 }
 
+# Set KEY=VALUE in .env (replace the last line for KEY, or append). UTF-8 without BOM: Windows PowerShell's default
+# encodings (UTF-16 / BOM) break docker compose's .env parsing.
+function Set-EnvValue([string] $name, [string] $value) {
+  $path = Join-Path $PSScriptRoot ".env"
+  $lines = if (Test-Path $path) { @([IO.File]::ReadAllLines($path)) } else { @() }
+  $idx = -1
+  for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match "^\s*$name\s*=") { $idx = $i } }
+  if ($idx -ge 0) { $lines[$idx] = "$name=$value" } else { $lines += "$name=$value" }
+  [IO.File]::WriteAllText($path, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+}
+
 # A setting from the environment, else from .env, else the default (the same order docker compose uses).
 function Setting([string] $name, [string] $default) {
   $value = [Environment]::GetEnvironmentVariable($name)
@@ -73,10 +86,61 @@ switch ($Action) {
     Write-Host "UI http://localhost:$UiPort   API http://localhost:$ApiPort/docs   MLflow http://localhost:$MlflowPort" -ForegroundColor Green
   }
   "serve" {
-    $run = if ($Arg1) { $Arg1 } else { "argus_demo_llm_scorer" }
+    $run = if ($Arg1) { $Arg1 } else { Setting "RUN_NAME" "argus_demo_llm_scorer" }
+    if ($run -notmatch "^[a-z0-9][a-z0-9_-]{1,62}$" -or -not (Test-Path "training/outputs/$run")) { throw "no trained run '$run' in training/outputs" }
+    # saved in .env (like serve.sh on the VM): the UI shows it, and containers restarted by Docker keep serving it
+    Set-EnvValue "RUN_NAME" $run; Set-EnvValue "EXPLAINER_RUN" $run
     $env:RUN_NAME = $run; $env:EXPLAINER_RUN = $run
-    Run "docker compose --profile serve up -d scoring explainer"
+    if (Test-Path "training/outputs/$run/explainer_student/awq") {
+      # the scorer first and on its own: payments need it; the explainer is optional (templates explain without it),
+      # so a vLLM image that cannot be pulled or a model that does not fit never blocks scoring
+      Run "docker compose --profile serve up -d scoring"
+      Write-Host "> docker compose --profile serve up -d explainer" -ForegroundColor Cyan
+      docker compose --profile serve up -d explainer
+      if ($LASTEXITCODE -ne 0) {
+        Write-Host "the vLLM explainer did not start (image download / GPU memory?): explanations come from templates; run serve $run again to retry" -ForegroundColor Yellow
+        $global:LASTEXITCODE = 0
+      }
+    } else {
+      # vLLM cannot start without the model (it would restart forever holding GPU memory): templates explain instead
+      Write-Host "run '$run' has no AWQ explainer: serving the scorer only, explanations come from templates" -ForegroundColor Yellow
+      Invoke-Expression "docker compose --profile serve stop explainer" 2>$null
+      Run "docker compose --profile serve up -d scoring"
+    }
     Write-Host "Fraud Model API http://localhost:$ScoringPort/docs (serving $run)" -ForegroundColor Green
+  }
+  "apply" {
+    # same rules as deploy/hyperstack/apply.sh: core services always, serving / stream services only if running now
+    $svcs = @(@($Arg1, $Arg2) + $Rest | Where-Object { $_ })
+    if (-not $svcs) { throw "usage: .\argus.ps1 apply <service>...  (frontend platform mlflow scoring explainer stream kinesis)" }
+    $running = @(docker compose --profile serve --profile stream ps --services --status running)
+    $todo = @()
+    foreach ($s in $svcs) {
+      if ($s -in "frontend", "platform", "mlflow") { $todo += $s }
+      elseif ($s -in "scoring", "explainer", "stream", "kinesis") {
+        if ($running -contains $s) { $todo += $s } else { Write-Host "$s is not running: it reads the new settings when it next starts" -ForegroundColor Yellow }
+      } else { throw "unknown service '$s'" }
+    }
+    $others = @($todo | Where-Object { $_ -ne "platform" })
+    if ($others) { Run ("docker compose --profile serve --profile stream up -d --no-deps " + ($others -join " ")) }
+    if ($todo -contains "platform") { Run "docker compose up -d --no-deps platform" }   # last: the UI talks to it
+    if (-not $todo) { Write-Host "nothing running needs a restart" -ForegroundColor Green }
+  }
+  "agent" {
+    # the operations agent (deploy/agent.py): runs what the UI's Operations / Settings pages ask for on this PC
+    switch ($Arg1) {
+      "start" {
+        Start-Process python -ArgumentList "deploy/agent.py" -WorkingDirectory $PSScriptRoot -WindowStyle Minimized
+        Write-Host "agent started in a minimized window (stop: .\argus.ps1 agent stop)" -ForegroundColor Green
+      }
+      "stop" {
+        $beat = "training/outputs/_platform/ops/agent.json"
+        if (Test-Path $beat) { $agentPid = (Get-Content $beat -Raw | ConvertFrom-Json).pid; Stop-Process -Id $agentPid -Force -ErrorAction SilentlyContinue; Write-Host "agent stopped (pid $agentPid)" }
+        else { Write-Host "no agent heartbeat found" }
+      }
+      "status" { python deploy/agent.py --status }
+      default { Run "python deploy/agent.py" }   # foreground: Ctrl+C stops it
+    }
   }
   "unserve" { Run "docker compose --profile serve stop scoring explainer" }
   "train" {
@@ -129,7 +193,7 @@ switch ($Action) {
   "test" {
     $index = if ($env:PIP_INDEX_URL) { $env:PIP_INDEX_URL } else { "https://pypi.org/simple" }
     Run "docker build -q --build-arg WITH_TESTS=true --build-arg PIP_INDEX_URL=$index -t argus-platform:test ./platform"
-    Run "docker run --rm argus-platform:test python -m pytest -q"
+    Run "docker run --rm -v `"${PWD}/deploy:/deploy:ro`" argus-platform:test python -m pytest -q"   # /deploy: the operations catalogue
     Run "docker compose run --rm --no-deps -T -e CUDA_VISIBLE_DEVICES= -v `"${PWD}/training/tests:/workspace/tests`" -v `"${PWD}/training/pytest.ini:/workspace/pytest.ini`" trainer sh -c `"pip install -q pytest==9.2.0 && python -m pytest -q -p no:cacheprovider tests`""
     Run "docker run --rm -v `"${PWD}/scoring_api/tests:/workspace/tests`" -v `"${PWD}/training/argus_ft:/workspace/argus_ft`" -e CUDA_VISIBLE_DEVICES= argus-scoring:latest sh -c `"pip install -q pytest==9.2.0 && python -m pytest -q -p no:cacheprovider tests`""
     Run "docker build -q --build-arg WITH_TESTS=true --build-arg PIP_INDEX_URL=$index -t argus-stream:test ./stream"

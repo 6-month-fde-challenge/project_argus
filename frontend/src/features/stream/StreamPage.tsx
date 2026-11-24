@@ -16,6 +16,7 @@ interface StreamState {
   scoring: {
     url: string; status: string; model_version: string | null; active_run: string | null; scored: number; errors: number;
     breaker_open: boolean; shadow_run: string | null; shadow_status: string;
+    serving_mode?: string | null; demo_model?: boolean; demo_reason?: string | null;   // DemoModelServing alarm
   } | null;
   producer: Producer;
 }
@@ -189,6 +190,12 @@ export default function StreamPage() {
         actions={<NativeSelect value={minutes} onChange={(e) => setMinutes(Number(e.target.value))} className="h-9 w-36 text-xs">
           {[15, 60, 360, 1440].map((m) => <option key={m} value={m}>last {m >= 60 ? `${m / 60} h` : `${m} min`}</option>)}</NativeSelect>} />
 
+      {sc?.demo_model && (
+        <div className="mb-5 flex items-start gap-3 rounded-xl border border-bad/40 bg-bad/10 p-4 text-sm text-bad">
+          <Skull className="mt-0.5 h-5 w-5 shrink-0" />
+          <div><b>Demo model serving live traffic.</b> {sc.demo_reason} Every transaction here is scored by a demo setup (CloudWatch alarm
+            demo-model-serving on AWS). Serve a measured run with the production profile: Settings → Serving profile, then Operations → Serve a run.</div>
+        </div>)}
       <Card className="mb-5 p-4">
         <div className="flex flex-wrap items-center gap-2">
           <Stage label="Producer" detail={p ? `${p.running ? `${p.rate} tx/s` : "off"} · ${fmt.int(p.sent)} sent · ${p.source}` : null} ok={p ? p.running && !p.error : null} />

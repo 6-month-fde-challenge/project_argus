@@ -6,13 +6,13 @@ the FIFO queue order.
 from __future__ import annotations
 
 import json
-import os
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..core.errors import NotFound
+from .fs import write_atomic
 
 ACTIVE = {"queued", "running"}
 TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -34,10 +34,7 @@ class JobStore:
             return []
 
     def _write(self, jobs: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(jobs, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)  # atomic: readers never see a half-written file
+        write_atomic(self.path, json.dumps(jobs, indent=2).encode("utf-8"))  # atomic, owned like its folder
 
     def all(self) -> list[dict]:
         with self._lock:

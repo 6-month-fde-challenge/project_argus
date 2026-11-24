@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from ...core.container import Container, get_container
 from ...core.errors import BadRequest
+from ...core.governance import Approval, check_approval, serving_mode
 from .samples import sample_requests
 
 router = APIRouter(prefix="/scoring", tags=["scoring"])
@@ -43,8 +44,15 @@ async def models(c: Container = Depends(get_container)):
 
 
 @router.post("/models/{run}/activate")
-async def activate(run: str, c: Container = Depends(get_container)):
-    return _relay(await c.scoring.admin_call("POST", f"models/{run}/activate"))
+async def activate(run: str, approval: Approval | None = Body(None, embed=True), c: Container = Depends(get_container)):
+    """Switch the live model. In production mode: two named people and a reason (it changes what live traffic meets);
+    the API itself still refuses demo runs there."""
+    mode = await serving_mode(c)
+    who = check_approval(approval, mode["production"], f"activating {run}")
+    status, body = await c.scoring.admin_call("POST", f"models/{run}/activate")
+    if status == 200:
+        c.changes.add("activation", f"activated {run} on the Fraud Model API", {"previous": mode.get("active_run")}, who)
+    return _relay((status, body))
 
 
 @router.get("/admin/thresholds")

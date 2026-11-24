@@ -54,7 +54,8 @@ def _stage_worker(config: str, overrides: list[str], name: str, results) -> None
         metrics, status = LADDER[name](ctx), "ok"
     except Exception:
         metrics, status = {"error": traceback.format_exc()}, "failed"
-    results.put({"status": status, "peak_gpu_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2), **metrics})
+    # the runner's own keys last: a stage's metrics can never overwrite its outcome (ok / failed)
+    results.put({**metrics, "status": status, "peak_gpu_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2)})
 
 
 def write_report_md(run_dir) -> None:

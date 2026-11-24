@@ -48,6 +48,7 @@ def test_allow_list(clean_env):
 
 class Stub(BaseHTTPRequestHandler):
     scorer = "ok"
+    mode = "production"   # the API's serving mode (production = demo runs refused)
 
     def _send(self, code, body):
         data = json.dumps(body).encode()
@@ -58,7 +59,8 @@ class Stub(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        self._send(200, {"status": "ok", "scorer": Stub.scorer, "model_version": "argus-xgb-x", "active_run": "x"})
+        self._send(200, {"status": "ok", "scorer": Stub.scorer, "model_version": "argus-xgb-x", "active_run": "x",
+                         "serving_mode": Stub.mode, "active_run_forced": False})
 
     def do_POST(self):
         ok = self.headers.get("Authorization") == "Bearer right"
@@ -88,6 +90,26 @@ def test_scoring_check_verifies_the_token_and_the_model(api):
         assert not ok and "no active model" in msg
     finally:
         Stub.scorer = "ok"
+
+
+def test_scoring_check_refuses_a_demo_setup_unless_allowed(api, monkeypatch):
+    monkeypatch.delenv("ARGUS_ALLOW_DEMO", raising=False)
+    Stub.mode = "demo"
+    try:
+        ok, msg = ops.check_scoring("127.0.0.1", "right")
+        assert not ok and "demo mode" in msg and "--allow-demo" in msg
+        monkeypatch.setenv("ARGUS_ALLOW_DEMO", "1")
+        assert ops.check_scoring("127.0.0.1", "right")[0]
+    finally:
+        Stub.mode = "production"
+
+
+def test_saved_tf_vars_never_carry_a_secret_whatever_the_spelling(clean_env):
+    """Windows reports environment variables upper-case: the token must still be recognised as the secret."""
+    clean_env.setenv("TF_VAR_SCORING_TOKEN", "s3cret")
+    clean_env.setenv("TF_VAR_TRANSACTION_TIME", "now")
+    saved = ops.saved_tf_vars()
+    assert saved == {"transaction_time": "now"} and "s3cret" not in str(saved)
 
 
 def test_scoring_check_when_nothing_listens(clean_env):

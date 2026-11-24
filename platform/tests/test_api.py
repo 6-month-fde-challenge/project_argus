@@ -153,3 +153,19 @@ def test_a_run_cannot_read_a_sibling_run_with_the_same_prefix(container):
     (outputs / "demo_run2" / "secret.txt").write_text("other run")
     with pytest.raises(NotFound):
         container.runs.file_text("demo_run", "../demo_run2/secret.txt")
+
+
+def test_samples_pick_up_a_dataset_synced_after_start(tmp_path):
+    """The playground's samples must not stay empty after a dataset sync (no platform restart needed)."""
+    import pandas as pd
+    from app.features.scoring.samples import sample_requests
+    assert [s["label"] for s in sample_requests(tmp_path)] == ["CRD 10.2 worked example (TX98231)", "Invalid: negative amount"]
+    folder = tmp_path / "raw" / "parquet" / "transactions" / "validation"
+    folder.mkdir(parents=True)
+    rows = [{"transaction_id": f"T{i}", "customer_id": "C1", "transaction_amount": 100.0 + i, "merchant_category": "gaming",
+             "transaction_time": pd.Timestamp("2025-11-01T01:00:00+05:30"), "device_id": "D1", "customer_age": 30,
+             "customer_location": '{"lat": 1, "lon": 2, "city": "Pune"}', "merchant_location": '{"lat": 1, "lon": 2, "city": "Pune"}',
+             "account_age": 10, "fraud_label": i % 2} for i in range(4)]
+    pd.DataFrame(rows).to_parquet(folder / "part-00001.parquet")
+    labels = [s["label"] for s in sample_requests(tmp_path)]
+    assert len(labels) > 2 and any(lbl.startswith("Known fraud") for lbl in labels)
